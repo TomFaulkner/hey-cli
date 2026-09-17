@@ -9,6 +9,7 @@ import (
 
 type smokeEvent struct {
 	ID           int64  `json:"id"`
+	RecordingID  int64  `json:"recording_id"`
 	Title        string `json:"title"`
 	StartsAt     string `json:"starts_at"`
 	AllDay       bool   `json:"all_day"`
@@ -121,9 +122,10 @@ func TestEventOccurrenceEditScopes(t *testing.T) {
 	firstDay := first.Format("2006-01-02")
 	currentDay := first.AddDate(0, 0, 7).Format("2006-01-02")
 	futureDay := first.AddDate(0, 0, 14).Format("2006-01-02")
+	beyondLastDay := first.AddDate(0, 0, 35).Format("2006-01-02")
 
 	stdout, stderr, code := hey(t, "event", "add", title,
-		"--starts-on", firstDay, "--all-day", "--repeat", "every_week",
+		"--starts-on", firstDay, "--all-day", "--repeat", "every_week", "--repeat-times", "5",
 		"--notes", "Bring the latest roadmap", "--json")
 	if code != 0 {
 		skipf(t, "repeating event add failed (exit %d): %s", code, stderr)
@@ -156,10 +158,23 @@ func TestEventOccurrenceEditScopes(t *testing.T) {
 	if !ok || current.Title != currentTitle {
 		t.Errorf("current occurrence = %#v, want title %q", current, currentTitle)
 	}
+	if current.ID != series.ID || current.RecordingID == 0 || current.RecordingID == series.ID {
+		t.Errorf("current occurrence ids = %#v, want the series id and a distinct recording_id", current)
+	}
 
 	futureOccurrence := fmt.Sprintf("%d_%s", series.ID, futureDay)
+	heyFail(t, "event", "edit", seriesID,
+		"--occurrence", futureOccurrence, "--apply-to", "future",
+		"--location", "Studio C", "--allow-plain-notes", "--json")
+	unchangedFutureEvents := dataAs[[]smokeEvent](t, heyJSON(t, "event", "day", futureDay))
+	unchangedFuture, ok := findSmokeOccurrence(unchangedFutureEvents, futureOccurrence)
+	if !ok || unchangedFuture.Location == "Studio C" {
+		t.Errorf("future occurrence changed without an explicit repeat schedule: %#v", unchangedFuture)
+	}
+
 	if _, stderr, code = hey(t, "event", "edit", seriesID,
 		"--occurrence", futureOccurrence, "--apply-to", "future",
+		"--repeat", "every_week", "--repeat-times", "3",
 		"--location", "Studio C", "--allow-plain-notes", "--json"); code != 0 {
 		skipf(t, "future occurrence edit failed (exit %d): %s", code, stderr)
 	}
@@ -175,6 +190,11 @@ func TestEventOccurrenceEditScopes(t *testing.T) {
 		t.Errorf("future series id = %d, want a new nonzero id", future.ID)
 	} else {
 		cleanupIDs = append(cleanupIDs, fmt.Sprint(future.ID))
+	}
+
+	beyondEvents := dataAs[[]smokeEvent](t, heyJSON(t, "event", "day", beyondLastDay))
+	if beyond, ok := findSmokeEventByTitle(beyondEvents, title); ok {
+		t.Errorf("finite future series grew past its three remaining occurrences: %#v", beyond)
 	}
 }
 

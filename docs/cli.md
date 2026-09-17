@@ -402,7 +402,7 @@ hey event add "Standup" --start-time 09:15 --repeat every_weekday --remind 10m
 hey event edit 4821 --title "Design review (moved)"
 hey event edit 4821 --starts-on 2026-09-04 --start-time 15:00
 hey event edit 4821 --occurrence 4821_2026-09-15 --apply-to current --start-time 15:00   # that day alone
-hey event edit 4821 --occurrence 4821_2026-09-15 --apply-to future --location "Studio, 3rd floor" --allow-plain-notes
+hey event edit 4821 --occurrence 4821_2026-09-15 --apply-to future --repeat every_week --repeat-times 8 --location "Studio, 3rd floor" --allow-plain-notes
 hey event delete 4821
 ```
 
@@ -415,11 +415,11 @@ lists once as the series it is stored as, not once per day it falls on.
 
 `hey event day` and `hey event week` read a span the way HEY's own views draw it: a
 repeating event is expanded into the occurrences that fall inside it, each carrying that
-day's own times and an `occurrence_id`. An occurrence HEY draws from the series carries the
-series' id, which `hey event edit` and `hey event delete` take for the whole series; a day
-HEY has written out on its own carries an id of its own, which those two act on for that
-day alone, with the series in `parent_id`. A period covers the calendars switched on in
-HEY, the same set the app draws, so `day` and `week` take no `--calendar` — only `--limit`
+day's own times and an `occurrence_id`. Every occurrence carries the series in `id` and
+`parent_id`, which `hey event edit` and `hey event delete` take for the whole series. A day
+HEY has written out on its own also carries its own `recording_id`, which those commands
+act on for that day alone. A period covers the calendars switched on in HEY, the same set
+the app draws, so `day` and `week` take no `--calendar` — only `--limit`
 and `--all`. With no date they read the account's own today, whatever zone the machine
 runs in.
 
@@ -444,19 +444,23 @@ and is the choice HEY's own form puts to you: `current` changes that day alone, 
 changes it and every day after it. `--apply-to` without `--occurrence` is a usage error,
 as is any other value. The day is read on its own date rather than searched for, so
 `[date]` can be left out or must name it. A change to `--repeat`, `--repeat-until` or
-`--repeat-times` cannot apply to one day, so `current` refuses those flags; `future` takes
-them. HEY splits the series on a `future` edit either way — the days from this one on
-become a new series with a new id, the old series stops the day before, and the answer is
-still the day you edited — so read the day or the week again for the new series id before
-editing it further.
+`--repeat-times` cannot apply to one day, so `current` refuses those flags. A `future`
+edit starts a new series and requires `--repeat` to state its complete schedule. Combine
+it with `--repeat-times` or `--repeat-until` for a finite series, naming how many
+occurrences remain from the edited day. The last day cannot precede the new series' first
+day. `--repeat` alone means the new series continues forever. HEY splits the series there
+— the days from this one on become a new series with
+a new id, the old series stops the day before, and the answer is still the day you edited
+— so read the day or the week again for the new series id before editing it further.
 
 An occurrence edit keeps more than a whole-event edit does, and refuses what it cannot
 keep. It sends back the day's own schedule and zones, notes, location, link, attached
 email, reminders and circle, taking them from the day itself where HEY has already written
-that day out on its own. A day like that lists in `day` and `week` with an id of its own,
-which `hey event edit <id>` and `hey event delete <id>` act on for that day alone, and
-with the series in `parent_id`, which is what `--occurrence` takes beside its
-`occurrence_id`. The countdown is read back from the recording HEY keeps for it — on the
+that day out on its own. A day like that lists in `day` and `week` with the series in
+`id` and `parent_id`, plus its own `recording_id`, which `hey event edit <recording_id>`
+and `hey event delete <recording_id>` act on for that day alone. The series id is what
+`--occurrence` takes beside its `occurrence_id`. The countdown is read back from the
+recording HEY keeps for it — on the
 day, or on the day the series began in one more single-day read — and sent again, so it
 survives unless `--countdown 0` removes it; a countdown whose length cannot be read back
 stops the edit and says so. One day of a series with a countdown cannot lose it alone:

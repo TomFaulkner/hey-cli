@@ -58,12 +58,11 @@ event that falls on it, occurrences of a repeating series included, and nothing 
 outside it.
 
 The day covers the calendars switched on in HEY, the same set the app draws, so there is
-no --calendar to narrow it. An occurrence HEY draws from the series carries the series'
-id, which 'hey event edit' and 'hey event delete' take for the whole series. A day HEY has
-written out on its own — after an edit of that day alone, or a reminder — carries an id of
-its own, which those two act on for that day alone, and names its series in parent_id.
-Either way the occurrence_id is what 'hey event edit --occurrence' takes, with the series
-id (parent_id) before it.`,
+no --calendar to narrow it. Every occurrence carries the series in id and parent_id, which
+'hey event edit' and 'hey event delete' take for the whole series. A day HEY has written
+out on its own — after an edit of that day alone, or a reminder — also carries its own
+recording_id, which those two commands act on for that day alone. Either way occurrence_id
+is what 'hey event edit --occurrence' takes, with the series id before it.`,
 		Example: `  hey event day
   hey event day 2026-09-02
   hey event day --json`,
@@ -94,12 +93,11 @@ func newEventsWeekCommand() *eventsPeriodCommand {
 inside the week, occurrences of a repeating series included. Any day names its week.
 
 The week covers the calendars switched on in HEY, the same set the app draws, so there is
-no --calendar to narrow it. An occurrence HEY draws from the series carries the series'
-id, which 'hey event edit' and 'hey event delete' take for the whole series. A day HEY has
-written out on its own — after an edit of that day alone, or a reminder — carries an id of
-its own, which those two act on for that day alone, and names its series in parent_id.
-Either way the occurrence_id is what 'hey event edit --occurrence' takes, with the series
-id (parent_id) before it.`,
+no --calendar to narrow it. Every occurrence carries the series in id and parent_id, which
+'hey event edit' and 'hey event delete' take for the whole series. A day HEY has written
+out on its own — after an edit of that day alone, or a reminder — also carries its own
+recording_id, which those two commands act on for that day alone. Either way occurrence_id
+is what 'hey event edit --occurrence' takes, with the series id before it.`,
 		Example: `  hey event week
   hey event week 2026-09-02
   hey event week --json`,
@@ -142,35 +140,51 @@ func (c *eventsPeriodCommand) run(cmd *cobra.Command, args []string) error {
 		events = filterRecordingsByType(&period.Recordings, recordingTypeEvent)
 	}
 	sortEventsByStart(events)
-	resolveOccurrenceSeries(events)
+	rows := occurrenceEventRows(events)
 
-	total := len(events)
-	if c.limit > 0 && !c.all && len(events) > c.limit {
-		events = events[:c.limit]
+	total := len(rows)
+	if c.limit > 0 && !c.all && len(rows) > c.limit {
+		rows = rows[:c.limit]
 	}
-	notice := output.TruncationNotice(len(events), total)
+	notice := output.TruncationNotice(len(rows), total)
 
-	return writeEventRows(cmd, events, c.describe(date), notice)
+	return writeEventRows(cmd, rows, c.describe(date), notice)
 }
 
 // periodNow is the date the period reads accept for today: HEY resolves it in the
 // account's own time zone, which the CLI process's clock cannot.
 const periodNow = "now"
 
-// resolveOccurrenceSeries gives each row the ID the event verbs take. HEY serves a day of a
-// repeating series as a virtual occurrence — no id of its own, the series in parent_id — but
-// 'hey event edit' and 'hey event delete' take the series, so the row carries it.
-//
-// A day an earlier edit or a reminder has written out is different: it has an id of its
-// own, and HEY's event routes act on that id for that day alone — an edit or a delete by
-// it reaches nothing else. So it keeps its id, and parent_id names its series, which is
-// what `hey event edit --occurrence` takes beside its occurrence_id.
-func resolveOccurrenceSeries(events []generated.Recording) {
-	for i := range events {
-		if events[i].Id == 0 && events[i].ParentId != 0 {
-			events[i].Id = events[i].ParentId
-		}
+// eventRow is the event shape the CLI publishes. An occurrence's id names its series,
+// while RecordingID names a realized day's own event for an edit or delete of that day.
+type eventRow struct {
+	generated.Recording
+	RecordingID int64 `json:"recording_id,omitempty"`
+}
+
+func eventRows(events []generated.Recording) []eventRow {
+	rows := make([]eventRow, len(events))
+	for i, event := range events {
+		rows[i] = eventRow{Recording: event}
 	}
+	return rows
+}
+
+// occurrenceEventRows gives every occurrence the series id used for whole-series actions.
+// A virtual occurrence has no id of its own. A realized occurrence publishes that own id
+// separately as recording_id for actions on that day alone.
+func occurrenceEventRows(events []generated.Recording) []eventRow {
+	rows := eventRows(events)
+	for i := range rows {
+		if rows[i].ParentId == 0 {
+			continue
+		}
+		if rows[i].Id != 0 {
+			rows[i].RecordingID = rows[i].Id
+		}
+		rows[i].Id = rows[i].ParentId
+	}
+	return rows
 }
 
 // sortEventsByStart puts a period's events in the order HEY draws the span: day by day,
@@ -206,7 +220,7 @@ func eventDay(event generated.Recording) string {
 // writeEventRows renders one listing of events: the table when styled, the JSON envelope
 // with the add/edit/delete breadcrumbs otherwise. described names the span read, in
 // whatever words the command reads it — a window, a day, a week.
-func writeEventRows(cmd *cobra.Command, events []generated.Recording, described, notice string) error {
+func writeEventRows(cmd *cobra.Command, events []eventRow, described, notice string) error {
 	if writer.IsStyled() {
 		if len(events) == 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "No events %s.\n", described)

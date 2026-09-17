@@ -33,8 +33,9 @@ type occurrenceEdit struct {
 // parseOccurrence reads --occurrence and --apply-to, and answers nil for an edit of the
 // whole event. Everything here is refused before a request is made: the occurrence_id has
 // to be the one a day or a week listing served, byte for byte, naming the series the
-// positional id names; --apply-to has to say current or future; and a change to the
-// schedule cannot apply to one day, which is HEY's rule as much as this command's.
+// positional id names; --apply-to has to say current or future; a future edit has to state
+// the schedule of the new series explicitly; and a schedule change cannot apply to one day,
+// which is HEY's rule as much as this command's.
 func (c *eventsEditCommand) parseOccurrence(cmd *cobra.Command, id int64, on string) (*occurrenceEdit, error) {
 	flags := cmd.Flags()
 	if !flags.Changed("occurrence") {
@@ -75,6 +76,10 @@ func (c *eventsEditCommand) parseOccurrence(cmd *cobra.Command, id int64, on str
 	scope, err := parseApplyTo(c.applyTo, flags.Changed("apply-to"))
 	if err != nil {
 		return nil, err
+	}
+	if scope == hey.OccurrenceScopeThisAndFollowing && !flags.Changed("repeat") {
+		return nil, apierr.ErrUsageHint("--apply-to future needs --repeat to define the new series",
+			"pass --repeat with --repeat-times or --repeat-until, or pass --repeat alone to repeat forever")
 	}
 	if scope == hey.OccurrenceScopeThisEvent {
 		for _, flag := range []string{"repeat", "repeat-until", "repeat-times"} {
@@ -163,6 +168,10 @@ func (c *eventsEditCommand) editOccurrence(ctx context.Context, cmd *cobra.Comma
 	}
 
 	schedule, err := c.fields.scheduleFrom(cmd, event)
+	if err != nil {
+		return err
+	}
+	err = checkRepeatStarts(repeat, schedule.startsAt)
 	if err != nil {
 		return err
 	}

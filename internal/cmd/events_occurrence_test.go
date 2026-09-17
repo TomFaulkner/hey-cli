@@ -139,8 +139,8 @@ func TestEventsEditOccurrenceCurrentChangesThatDayAlone(t *testing.T) {
 	}
 }
 
-// The wider scope is the same write with apply_to_future on. It is the one that may change
-// the schedule, and a schedule it is not given is left as it is rather than ended.
+// The wider scope is the same write with apply_to_future on. It starts a new series, so
+// the caller states that series' complete schedule, including how many occurrences remain.
 func TestEventsEditOccurrenceFutureChangesTheDaysFromThisOneOn(t *testing.T) {
 	handler, _ := occurrenceServer(t, "2026-09-15",
 		`{"Calendar::Event":[`+occurrenceSeriesJSON+`]}`,
@@ -152,8 +152,11 @@ func TestEventsEditOccurrenceFutureChangesTheDaysFromThisOneOn(t *testing.T) {
 			if got := form.Get("repeat_frequency"); got != "every_other_week" {
 				t.Errorf("repeat_frequency = %q", got)
 			}
-			if got := form.Get("calendar_recurrence_schedule[recurs_until_type]"); got != "forever" {
-				t.Errorf("recurs_until_type = %q", got)
+			if got := form.Get("calendar_recurrence_schedule[recurs_until_type]"); got != "count" {
+				t.Errorf("recurs_until_type = %q, want count", got)
+			}
+			if got := form.Get("calendar_recurrence_schedule[recurs_count]"); got != "3" {
+				t.Errorf("recurs_count = %q, want the three occurrences remaining", got)
 			}
 			if got := form.Get("calendar_event[starts_at]"); got != "2026-09-15" {
 				t.Errorf("starts_at = %q, want the new series to begin on this day", got)
@@ -168,7 +171,7 @@ func TestEventsEditOccurrenceFutureChangesTheDaysFromThisOneOn(t *testing.T) {
 
 	response, err := runJSONCommand(t, handler,
 		"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
-		"--repeat", "every_other_week", "--allow-plain-notes")
+		"--repeat", "every_other_week", "--repeat-times", "3", "--allow-plain-notes")
 	if err != nil {
 		t.Fatalf("execute occurrence edit: %v", err)
 	}
@@ -255,6 +258,7 @@ func TestEventsEditOccurrenceRefusesWhatItCannotMean(t *testing.T) {
 	}{
 		{name: "apply-to without occurrence", args: []string{"--apply-to", "current"}, want: "--apply-to needs --occurrence"},
 		{name: "occurrence without apply-to", args: []string{"--occurrence", "4821_2026-09-15"}, want: "--apply-to is required with --occurrence"},
+		{name: "future without a complete repeat schedule", args: []string{"--occurrence", "4821_2026-09-15", "--apply-to", "future", "--title", "Design review (moved)"}, want: "--apply-to future needs --repeat to define the new series"},
 		{name: "occurrence given empty", args: []string{"--occurrence=", "--title", "Design review (moved)"}, want: "--occurrence needs an occurrence_id"},
 		{name: "occurrence given empty with a scope", args: []string{"--occurrence", "", "--apply-to", "current"}, want: "--occurrence needs an occurrence_id"},
 		{name: "unknown scope", args: []string{"--occurrence", "4821_2026-09-15", "--apply-to", "all"}, want: "invalid apply-to: all"},
@@ -437,7 +441,8 @@ func TestEventsEditOccurrenceRemovesTheCountdownOnlyWhereItCan(t *testing.T) {
 			"",
 			noCountdown)
 		_, err := runJSONCommand(t, handler,
-			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--countdown", "0", "--allow-plain-notes")
+			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+			"--repeat", "every_week", "--countdown", "0", "--allow-plain-notes")
 		if err != nil {
 			t.Fatalf("execute occurrence edit: %v", err)
 		}
@@ -721,8 +726,11 @@ func TestEventsEditOccurrenceKeepsTheClockAcrossASpringForward(t *testing.T) {
 					t.Errorf("starts_at_time_zone_name = %q", got)
 				}
 			})
-			_, err := runJSONCommand(t, handler,
-				"event", "edit", "4821", "--occurrence", "4821_2026-03-08", "--apply-to", scope, "--title", "Early standup (moved)")
+			args := []string{"event", "edit", "4821", "--occurrence", "4821_2026-03-08", "--apply-to", scope, "--title", "Early standup (moved)"}
+			if scope == "future" {
+				args = append(args, "--repeat", "every_week")
+			}
+			_, err := runJSONCommand(t, handler, args...)
 			if err != nil {
 				t.Fatalf("execute occurrence edit: %v", err)
 			}
@@ -748,7 +756,8 @@ func TestEventsEditOccurrenceMovesADayToAnotherCalendar(t *testing.T) {
 			}
 		})
 	_, err := runJSONCommand(t, handler,
-		"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--calendar", "10", "--allow-plain-notes")
+		"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+		"--repeat", "every_week", "--calendar", "10", "--allow-plain-notes")
 	if err != nil {
 		t.Fatalf("execute occurrence edit: %v", err)
 	}
@@ -781,7 +790,8 @@ func TestEventsEditOccurrenceFutureKeepsAMovedDaysCalendar(t *testing.T) {
 				}
 			})
 		_, err := runJSONCommand(t, handler,
-			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--title", "Design review (vendor, final)")
+			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+			"--repeat", "every_week", "--title", "Design review (vendor, final)")
 		if err != nil {
 			t.Fatalf("execute occurrence edit: %v", err)
 		}
@@ -795,7 +805,8 @@ func TestEventsEditOccurrenceFutureKeepsAMovedDaysCalendar(t *testing.T) {
 				}
 			})
 		_, err := runJSONCommand(t, handler,
-			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--calendar", "9", "--title", "Design review (vendor, final)")
+			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+			"--repeat", "every_week", "--calendar", "9", "--title", "Design review (vendor, final)")
 		if err != nil {
 			t.Fatalf("execute occurrence edit: %v", err)
 		}
@@ -831,7 +842,8 @@ func TestEventsEditOccurrenceFutureRefusesToDropADaysOwnGuests(t *testing.T) {
 	t.Run("refused", func(t *testing.T) {
 		handler, writes := occurrenceServer(t, "2026-09-15", day, "", func(t *testing.T, form url.Values) {})
 		_, err := runJSONCommand(t, handler,
-			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--title", "Design review (vendor, final)")
+			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+			"--repeat", "every_week", "--title", "Design review (vendor, final)")
 		var cliErr *apierr.Error
 		if !errors.As(err, &cliErr) || cliErr.Code != apierr.CodeUsage || !strings.Contains(cliErr.Message, "guest list of its own (bob@example.org)") {
 			t.Fatalf("error = %v, want the guest-list refusal", err)
@@ -848,7 +860,8 @@ func TestEventsEditOccurrenceFutureRefusesToDropADaysOwnGuests(t *testing.T) {
 			}
 		})
 		_, err := runJSONCommand(t, handler,
-			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--invite", "bob@example.org", "--title", "Design review (vendor, final)")
+			"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future",
+			"--repeat", "every_week", "--invite", "bob@example.org", "--title", "Design review (vendor, final)")
 		if err != nil {
 			t.Fatalf("execute occurrence edit: %v", err)
 		}
@@ -900,7 +913,7 @@ func TestEventsEditOccurrenceKeepsAnEightDayCountdown(t *testing.T) {
 }
 
 // A repeat count of nothing is not "forever": zero and a negative count are refused
-// before anything is read, on the future edit that would split the series and on a create.
+// before anything is read, on a future split, a create and a whole-series edit.
 func TestEventsRefuseARepeatCountOfNothing(t *testing.T) {
 	tests := []struct {
 		name string
@@ -908,7 +921,7 @@ func TestEventsRefuseARepeatCountOfNothing(t *testing.T) {
 	}{
 		{name: "future edit, zero", args: []string{"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--repeat", "every_week", "--repeat-times=0"}},
 		{name: "future edit, negative", args: []string{"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--repeat", "every_week", "--repeat-times=-1"}},
-		{name: "add, zero", args: []string{"event", "add", "Standup", "--calendar", "9", "--repeat", "every_weekday", "--repeat-times=0"}},
+		{name: "add, zero", args: []string{"event", "add", "Standup", "--repeat", "every_weekday", "--repeat-times=0"}},
 		{name: "whole event, zero", args: []string{"event", "edit", "4821", "--repeat", "every_week", "--repeat-times", "0"}},
 	}
 	for _, tt := range tests {
@@ -932,18 +945,99 @@ func TestEventsRefuseARepeatCountOfNothing(t *testing.T) {
 			if !errors.As(err, &cliErr) || cliErr.Code != apierr.CodeUsage || !strings.Contains(cliErr.Message, "is not a number of occurrences") {
 				t.Fatalf("error = %v, want the repeat-times refusal", err)
 			}
-			if strings.HasPrefix(tt.name, "future") && requests.Load() != 0 {
+			if requests.Load() != 0 {
 				t.Errorf("requests = %d, want none before the flags are read", requests.Load())
 			}
 		})
 	}
 }
 
-// The day and the week say which id an occurrence carries: the series' for one HEY draws
-// from the series, its own for a day HEY has written out, with the series in parent_id.
+// An explicitly supplied recurrence value must carry content. This is especially important
+// for a future split: --repeat= must not pass the complete-schedule gate and fall back to
+// HEY's "custom" behavior, which would copy and restart a finite count.
+func TestEventsRefuseEmptyRepeatValuesBeforeReading(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "future edit, empty frequency", args: []string{"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--repeat="}, want: "--repeat needs a frequency"},
+		{name: "future edit, empty last day", args: []string{"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--repeat", "every_week", "--repeat-until="}, want: "--repeat-until needs a date"},
+		{name: "add, empty frequency", args: []string{"event", "add", "Standup", "--repeat="}, want: "--repeat needs a frequency"},
+		{name: "whole event, empty last day", args: []string{"event", "edit", "4821", "--repeat", "every_week", "--repeat-until="}, want: "--repeat-until needs a date"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			_, err := runJSONCommand(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Error(w, "unexpected request", http.StatusInternalServerError)
+			}), tt.args...)
+			var cliErr *apierr.Error
+			if !errors.As(err, &cliErr) || cliErr.Code != apierr.CodeUsage || !strings.Contains(cliErr.Message, tt.want) {
+				t.Fatalf("error = %v, want usage error containing %q", err, tt.want)
+			}
+			if requests.Load() != 0 {
+				t.Errorf("requests = %d, want none before the flags are read", requests.Load())
+			}
+		})
+	}
+}
+
+// A replacement recurrence must reach at least its first day. Otherwise HEY accepts the
+// write as a one-off event and truncates the old series behind it.
+func TestEventsRefuseARepeatEndBeforeTheFutureSeriesStarts(t *testing.T) {
+	tests := []struct {
+		name     string
+		startsOn string
+		until    string
+	}{
+		{name: "occurrence day", until: "2026-09-14"},
+		{name: "moved day", startsOn: "2026-10-01", until: "2026-09-30"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, writes := occurrenceServer(t, "2026-09-15",
+				`{"Calendar::Event":[`+occurrenceSeriesJSON+`]}`, "", func(t *testing.T, form url.Values) {
+					t.Error("wrote the invalid replacement series")
+				})
+			args := []string{"event", "edit", "4821", "--occurrence", "4821_2026-09-15", "--apply-to", "future", "--repeat", "every_week"}
+			if tt.startsOn != "" {
+				args = append(args, "--starts-on", tt.startsOn, "--ends-on", tt.startsOn)
+			}
+			args = append(args, "--repeat-until", tt.until, "--allow-plain-notes")
+			_, err := runJSONCommand(t, handler, args...)
+			var cliErr *apierr.Error
+			if !errors.As(err, &cliErr) || cliErr.Code != apierr.CodeUsage || !strings.Contains(cliErr.Message, "repeat-until") || !strings.Contains(cliErr.Message, "before starts-on") {
+				t.Fatalf("error = %v, want the recurrence-boundary usage error", err)
+			}
+			if writes.Load() != 0 {
+				t.Errorf("writes = %d, want none", writes.Load())
+			}
+		})
+	}
+
+	t.Run("new event before calendar discovery", func(t *testing.T) {
+		var requests atomic.Int32
+		_, err := runJSONCommand(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}), "event", "add", "Standup", "--starts-on", "2026-09-15", "--repeat", "every_week", "--repeat-until", "2026-09-14")
+		var cliErr *apierr.Error
+		if !errors.As(err, &cliErr) || cliErr.Code != apierr.CodeUsage || !strings.Contains(cliErr.Message, "before starts-on") {
+			t.Fatalf("error = %v, want the recurrence-boundary usage error", err)
+		}
+		if requests.Load() != 0 {
+			t.Errorf("requests = %d, want none before calendar discovery", requests.Load())
+		}
+	})
+}
+
+// The day and the week say which identifiers an occurrence carries: id and parent_id name
+// the series, while a written-out day adds recording_id for its own event route.
 func TestEventsPeriodHelpNamesTheSeriesID(t *testing.T) {
 	for _, command := range []*eventsPeriodCommand{newEventsDayCommand(), newEventsWeekCommand()} {
-		for _, want := range []string{"parent_id", "occurrence_id", "written out"} {
+		for _, want := range []string{"parent_id", "recording_id", "occurrence_id"} {
 			if !strings.Contains(command.cmd.Long, want) {
 				t.Errorf("%s help does not mention %q", command.cmd.Name(), want)
 			}
