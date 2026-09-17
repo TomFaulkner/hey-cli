@@ -4,15 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 )
 
 type smokeEvent struct {
-	ID       int64  `json:"id"`
-	Title    string `json:"title"`
-	StartsAt string `json:"starts_at"`
-	AllDay   bool   `json:"all_day"`
-	Notes    string `json:"description"`
-	Location string `json:"location"`
+	ID           int64  `json:"id"`
+	Title        string `json:"title"`
+	StartsAt     string `json:"starts_at"`
+	AllDay       bool   `json:"all_day"`
+	Notes        string `json:"description"`
+	Location     string `json:"location"`
+	OccurrenceID string `json:"occurrence_id"`
 }
 
 func TestEventList(t *testing.T) {
@@ -110,6 +112,88 @@ func TestEventCRUD(t *testing.T) {
 		t.Fatalf("failed to parse delete response: %v", err)
 	}
 	assertContains(t, deleted.Summary, "deleted")
+}
+
+func TestEventOccurrenceEditScopes(t *testing.T) {
+	uid := uniqueID()
+	title := fmt.Sprintf("Weekly design review %s", uid)
+	first := time.Now().AddDate(2, 0, 0)
+	firstDay := first.Format("2006-01-02")
+	currentDay := first.AddDate(0, 0, 7).Format("2006-01-02")
+	futureDay := first.AddDate(0, 0, 14).Format("2006-01-02")
+
+	stdout, stderr, code := hey(t, "event", "add", title,
+		"--starts-on", firstDay, "--all-day", "--repeat", "every_week",
+		"--notes", "Bring the latest roadmap", "--json")
+	if code != 0 {
+		skipf(t, "repeating event add failed (exit %d): %s", code, stderr)
+	}
+	var added Response
+	if err := json.Unmarshal([]byte(stdout), &added); err != nil {
+		t.Fatalf("failed to parse repeating event response: %v", err)
+	}
+	series := dataAs[smokeEvent](t, added)
+	if series.ID == 0 {
+		t.Fatal("repeating event response carries no event ID")
+	}
+	seriesID := fmt.Sprint(series.ID)
+	cleanupIDs := []string{seriesID}
+	t.Cleanup(func() {
+		for _, id := range cleanupIDs {
+			_, _, _ = hey(t, "event", "delete", id)
+		}
+	})
+
+	currentOccurrence := fmt.Sprintf("%d_%s", series.ID, currentDay)
+	currentTitle := title + " (vendor review)"
+	if _, stderr, code = hey(t, "event", "edit", seriesID,
+		"--occurrence", currentOccurrence, "--apply-to", "current",
+		"--title", currentTitle, "--allow-plain-notes", "--json"); code != 0 {
+		skipf(t, "current occurrence edit failed (exit %d): %s", code, stderr)
+	}
+	currentEvents := dataAs[[]smokeEvent](t, heyJSON(t, "event", "day", currentDay))
+	current, ok := findSmokeOccurrence(currentEvents, currentOccurrence)
+	if !ok || current.Title != currentTitle {
+		t.Errorf("current occurrence = %#v, want title %q", current, currentTitle)
+	}
+
+	futureOccurrence := fmt.Sprintf("%d_%s", series.ID, futureDay)
+	if _, stderr, code = hey(t, "event", "edit", seriesID,
+		"--occurrence", futureOccurrence, "--apply-to", "future",
+		"--location", "Studio C", "--allow-plain-notes", "--json"); code != 0 {
+		skipf(t, "future occurrence edit failed (exit %d): %s", code, stderr)
+	}
+	futureEvents := dataAs[[]smokeEvent](t, heyJSON(t, "event", "day", futureDay))
+	future, ok := findSmokeEventByTitle(futureEvents, title)
+	if !ok {
+		t.Fatalf("future occurrence not found among %#v", futureEvents)
+	}
+	if future.Location != "Studio C" {
+		t.Errorf("future occurrence location = %q, want Studio C", future.Location)
+	}
+	if future.ID == 0 || future.ID == series.ID {
+		t.Errorf("future series id = %d, want a new nonzero id", future.ID)
+	} else {
+		cleanupIDs = append(cleanupIDs, fmt.Sprint(future.ID))
+	}
+}
+
+func findSmokeOccurrence(events []smokeEvent, occurrenceID string) (smokeEvent, bool) {
+	for _, event := range events {
+		if event.OccurrenceID == occurrenceID {
+			return event, true
+		}
+	}
+	return smokeEvent{}, false
+}
+
+func findSmokeEventByTitle(events []smokeEvent, title string) (smokeEvent, bool) {
+	for _, event := range events {
+		if event.Title == title {
+			return event, true
+		}
+	}
+	return smokeEvent{}, false
 }
 
 func TestEventAllDay(t *testing.T) {

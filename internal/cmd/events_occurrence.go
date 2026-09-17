@@ -406,7 +406,7 @@ func (c *eventsEditCommand) occurrenceCountdown(ctx context.Context, cmd *cobra.
 	}
 	if day.realized != nil {
 		if countdown, ok := countdownOf(day.countdowns, day.realized.Id); ok {
-			return countdownFromRecording(countdown)
+			return countdownFromRecording(countdown, *day.realized)
 		}
 		// A day that was moved is still listed under the date it stands for, but its
 		// countdown ends where it now starts, so that day is where its own countdown is.
@@ -425,7 +425,7 @@ func (c *eventsEditCommand) occurrenceCountdown(ctx context.Context, cmd *cobra.
 // series began on, and otherwise on that first day in one more read.
 func seriesCountdown(ctx context.Context, window recordingWindow, day occurrenceDay) (hey.CountdownParams, bool, error) {
 	if countdown, ok := countdownOf(day.countdowns, day.series.Id); ok {
-		params, err := countdownFromRecording(countdown)
+		params, err := countdownFromRecording(countdown, day.series)
 		return params, true, err
 	}
 	if day.series.StartsAt.UTC().Format(dateLayout) == day.occurrence.DateParam() {
@@ -459,7 +459,7 @@ func countdownEnding(ctx context.Context, window recordingWindow, event generate
 	if !ok {
 		return hey.CountdownParams{}, false, nil
 	}
-	params, err := countdownFromRecording(countdown)
+	params, err := countdownFromRecording(countdown, event)
 	return params, true, err
 }
 
@@ -473,25 +473,28 @@ func countdownOf(rows []generated.Recording, eventID int64) (generated.Recording
 	return generated.Recording{}, false
 }
 
-// countdownLabel is the one thing HEY serves about a countdown's length: its label, "3 weeks
-// before", from which the value and the unit its own form would submit are read back.
+// countdownLabel is the human label HEY serves for a countdown, such as "3 weeks before".
+// It is lossy, so countdownFromRecording checks it against the recording's timestamps rather
+// than treating its displayed value and unit as the interval the form originally submitted.
 var countdownLabel = regexp.MustCompile(`^(\d+) (day|week|month)s? before$`)
 
 // countdownFromRecording reads the countdown back out of the recording HEY keeps for it.
 //
-// The recording spans from the countdown's start to the moment the event starts, and its
-// start is the event's midnight less the countdown, so the span is the countdown plus
-// however far into its day the event starts: under a day more, never less. That span is
-// exact. The label is not: HEY tries months, then weeks, then days, and takes a remainder
-// of up to a whole day as a match, so eight days at midnight is "1 weeks before", 29 days
-// is "4 weeks before", and one day is "0 months before" — and sending the label back would
-// shorten every one of them. So the length is read off the span, and the label settles the
-// one thing the span cannot: a month is not a whole number of days, so a span that fits
-// both "N months" and "M days" is whichever the label says, which is what HEY's own form
-// would resend. A recording this cannot read is refused rather than guessed at or dropped,
-// since a countdown the write does not name is a countdown removed: the caller can still
-// name it with --countdown, or remove it with --countdown 0.
-func countdownFromRecording(countdown generated.Recording) (hey.CountdownParams, error) {
+// HEY starts the countdown at the beginning of the day in the zone handling the write,
+// less the requested interval, and ends it when the event starts. The recording's whole
+// span therefore also includes however far into that day the event falls. Taking that part
+// back out is important on a 25-hour fall-back day: flooring the whole span by 24 hours
+// would otherwise add a day to the countdown. The label is not enough on its own either: HEY tries months,
+// then weeks, then days, and takes a remainder of up to a whole day as a match, so eight
+// days at midnight is "1 weeks before", 29 days is "4 weeks before", and one day is "0
+// months before". The full span is used only to verify that label. The exact interval comes
+// from the countdown's start relative to a possible beginning of day, and has to be one of
+// the value/unit pairs HEY's form can submit.
+//
+// A recording this cannot read is refused rather than guessed at or dropped, since a
+// countdown the write does not name is a countdown removed: the caller can still name it
+// with --countdown, or remove it with --countdown 0.
+func countdownFromRecording(countdown, event generated.Recording) (hey.CountdownParams, error) {
 	unreadable := &apierr.Error{
 		Code:    apierr.CodeAPI,
 		Message: fmt.Sprintf("the event's countdown could not be read back: %q", terminal.SanitizeLine(countdown.Label)),
@@ -502,34 +505,106 @@ func countdownFromRecording(countdown generated.Recording) (hey.CountdownParams,
 	if match == nil {
 		return hey.CountdownParams{}, unreadable
 	}
-	labelValue, _ := strconv.Atoi(match[1])
-	labelUnit := match[2]
-
-	span := countdown.EndsAt.Sub(countdown.StartsAt)
-	if countdown.StartsAt.IsZero() || countdown.EndsAt.IsZero() || span <= 0 {
-		// Nothing to measure: the label is all there is, and a zero on it says nothing.
-		if labelValue < 1 {
-			return hey.CountdownParams{}, unreadable
-		}
-		units := map[string]hey.CountdownUnit{"day": hey.CountdownUnitDays, "week": hey.CountdownUnitWeeks, "month": hey.CountdownUnitMonths}
-		return hey.CountdownParams{Value: labelValue, Unit: units[labelUnit]}, nil
-	}
-
-	const day = 24 * time.Hour
-	if labelUnit == "month" {
-		month := time.Duration(hey.CountdownUnitMonths) * time.Second
-		if months := int(span / month); months >= 1 && span-time.Duration(months)*month < day {
-			return hey.CountdownParams{Value: months, Unit: hey.CountdownUnitMonths}, nil
-		}
-	}
-	days := int(span / day)
-	if days < 1 {
+	labelValue, err := strconv.Atoi(match[1])
+	if err != nil {
 		return hey.CountdownParams{}, unreadable
 	}
-	if labelUnit == "week" && days%7 == 0 {
-		return hey.CountdownParams{Value: days / 7, Unit: hey.CountdownUnitWeeks}, nil
+	labelUnit := match[2]
+
+	if countdown.StartsAt.IsZero() || countdown.EndsAt.IsZero() || event.StartsAt.IsZero() ||
+		!countdown.EndsAt.After(countdown.StartsAt) || !countdown.EndsAt.Equal(event.StartsAt) {
+		return hey.CountdownParams{}, unreadable
 	}
-	return hey.CountdownParams{Value: days, Unit: hey.CountdownUnitDays}, nil
+	if !countdownLabelMatchesDuration(countdown.EndsAt.Sub(countdown.StartsAt), labelValue, labelUnit) {
+		return hey.CountdownParams{}, unreadable
+	}
+
+	// A JSON write runs in UTC, while the web form runs in the reader's zone. The recording
+	// does not say which one created it, so try UTC and the event's own zone. A candidate is
+	// accepted only when it reconstructs one of the exact value/unit pairs the form can send
+	// and produces the label HEY served. If both zones give different valid answers, there is
+	// no lossless answer and the edit stops.
+	locations := []*time.Location{time.UTC}
+	if event.StartsAtTimeZone != "" {
+		loc, err := time.LoadLocation(event.StartsAtTimeZone)
+		if err != nil {
+			return hey.CountdownParams{}, unreadable
+		}
+		if loc != time.UTC {
+			locations = append(locations, loc)
+		}
+	}
+
+	var answer hey.CountdownParams
+	found := false
+	for _, loc := range locations {
+		localEnd := countdown.EndsAt.In(loc)
+		beginning := time.Date(localEnd.Year(), localEnd.Month(), localEnd.Day(), 0, 0, 0, 0, loc)
+		candidate, ok := countdownParamsForInterval(beginning.Sub(countdown.StartsAt))
+		if !ok {
+			continue
+		}
+		if found && candidate != answer {
+			return hey.CountdownParams{}, unreadable
+		}
+		answer, found = candidate, true
+	}
+	if !found {
+		return hey.CountdownParams{}, unreadable
+	}
+	return answer, nil
+}
+
+// countdownLabelMatchesDuration applies the same month, week, then day test HEY uses to
+// label a countdown recording. The label describes the recording's whole duration, which
+// includes the event's time of day; it does not directly describe the interval the form sent.
+func countdownLabelMatchesDuration(duration time.Duration, labelValue int, labelUnit string) bool {
+	if duration <= 0 {
+		return false
+	}
+	day := time.Duration(hey.CountdownUnitDays) * time.Second
+	for _, candidate := range []struct {
+		name     string
+		duration time.Duration
+	}{
+		{name: "month", duration: time.Duration(hey.CountdownUnitMonths) * time.Second},
+		{name: "week", duration: time.Duration(hey.CountdownUnitWeeks) * time.Second},
+		{name: "day", duration: day},
+	} {
+		if duration%candidate.duration <= day {
+			return int(duration/candidate.duration) == labelValue && candidate.name == labelUnit
+		}
+	}
+	return false
+}
+
+// countdownParamsForInterval recognizes an exact countdown interval the form can submit.
+// The label's unit does not choose the interval's unit: it describes the recording's longer
+// span, and on a 25-hour day can say "31 days" for an exact one-month interval.
+func countdownParamsForInterval(interval time.Duration) (hey.CountdownParams, bool) {
+	if interval <= 0 {
+		return hey.CountdownParams{}, false
+	}
+	day := time.Duration(hey.CountdownUnitDays) * time.Second
+	week := time.Duration(hey.CountdownUnitWeeks) * time.Second
+	month := time.Duration(hey.CountdownUnitMonths) * time.Second
+
+	unit := hey.CountdownUnitDays
+	var value int
+	switch {
+	case interval%month == 0:
+		unit, value = hey.CountdownUnitMonths, int(interval/month)
+	case interval%week == 0:
+		unit, value = hey.CountdownUnitWeeks, int(interval/week)
+	case interval%day == 0:
+		value = int(interval / day)
+	default:
+		return hey.CountdownParams{}, false
+	}
+	if value < 1 || value > 30 {
+		return hey.CountdownParams{}, false
+	}
+	return hey.CountdownParams{Value: value, Unit: unit}, true
 }
 
 // attendeeAddresses is a guest list as the set of addresses on it, which is how two lists
