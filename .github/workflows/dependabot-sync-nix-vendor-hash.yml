@@ -1,0 +1,76 @@
+name: Sync the Nix vendorHash on Dependabot PRs
+
+# A Dependabot Go bump changes go.sum, which moves buildGoModule's fixed-output
+# hash over the vendored modules and leaves nix/package.nix's `vendorHash`
+# stale. "Nix flake builds" is a required status check on main, so the bump
+# does not merge red — it wedges, and stays wedged until somebody runs
+# `make update-nix-hash` (Docker) and pushes. That hand-off is the whole cost
+# this workflow removes: it is recurring manual work on an otherwise unattended
+# weekly PR, not a hole in the gate.
+#
+# The SHA-pinned reusable workflow builds the flake at the PR's merge commit —
+# the same thing the Nix check builds — takes the corrected hash from Nix's
+# own go-modules fixed-output mismatch, and commits exactly that one line of
+# nix/package.nix back to the Dependabot branch with a one-hour cli-release-bot
+# token scoped to this repository. That push re-triggers the PR's pull_request
+# checks, so "Nix flake builds" re-runs on the new head and verifies the hash
+# it was handed. Auto-merge, which dependabot-auto-merge.yml enabled when the
+# PR opened, survives the push (a write-access actor's) and completes once the
+# check goes green.
+#
+# Why no `needs:` edge from the auto-merge job, the way basecamp-cli sequences
+# these in one file: there, "Nix flake builds" is not required, so an unordered
+# auto-merge lands the bump red (#697) and breaks main's flake. Here the
+# required check *is* the ordering — a stale head cannot merge — so the edge
+# would buy nothing and would cost something real: it would couple every
+# Dependabot PR's auto-merge, actions and docker bumps included, to the health
+# of a job that only Go bumps need.
+#
+# `paths:` is narrow on purpose. It only has to catch what Dependabot's Go
+# bumps touch, and the reusable workflow re-decides "is this a Go bump" from
+# the PR's own diff anyway: it no-ops on a PR that changes neither go.mod nor
+# go.sum, and refuses one that changes anything beyond go.mod, go.sum and
+# nix/package.nix. The Nix check's filter is deliberately wider (Go sources,
+# flake.nix, nix/**) because a human can move the vendored file set without
+# touching go.sum; that case is not Dependabot's and is not refreshed here —
+# it lands red with the hash and `make update-nix-hash` attached, which is what
+# scripts/nix-build-check.sh is for.
+#
+# Needs the cli-release-bot App installed on this repository with
+# contents: write, and its private key stored as a repository *Dependabot*
+# secret named RELEASE_APP_PRIVATE_KEY (Dependabot-triggered runs see only
+# Dependabot secrets) and, for the workflow_dispatch path, as a repository
+# Actions secret of the same name. release.yml's copies live in the `release`
+# environment and are not reachable from here, by design.
+
+on:
+  pull_request:
+    paths:
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Dependabot pull request number whose vendorHash to refresh
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Refresh the Nix vendorHash
+    if: github.event_name == 'workflow_dispatch' || (github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]') # zizmor: ignore[bot-conditions] -- dual check: actor validates the current trigger (and stops the App bot's own push from looping back here), user.login validates PR origin; on:pull_request, not pull_request_target, so GitHub sets the actor from who pushed
+    uses: basecamp/.github/.github/workflows/dependabot-sync-nix-vendor-hash.yml@293dc747a2cee44c5b4dae72067adeb681636d26
+    with:
+      pr: ${{ inputs.pr }}
+      # cli-release-bot's client id — the `release` environment's
+      # RELEASE_CLIENT_ID, which is a public identifier (every release run
+      # prints it) and, being environment-scoped, is not readable here.
+      app-client-id: Iv23liAbERu6z8d7t5A8
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    secrets:
+      app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
