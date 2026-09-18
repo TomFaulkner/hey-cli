@@ -198,11 +198,21 @@ type postingActionDoneMsg struct {
 	boxID           int64
 	sourceKind      mail.Kind
 	postingID       int64
+	postingIDs      []int64 // every posting a bulk action took, empty for a single-row action
 	effect          postingActionEffect
 	destinationKind string // the box kind a move filed into, empty for every other action
 	filingSeq       uint64 // which open-thread filing dispatched the move, zero for a list row's
 	seen            bool   // the action was taken on the Previously Seen screen
 	err             error
+}
+
+// postings is every posting the action took: the bulk selection when there was one,
+// otherwise the single row.
+func (msg postingActionDoneMsg) postings() []int64 {
+	if len(msg.postingIDs) > 0 {
+		return msg.postingIDs
+	}
+	return []int64{msg.postingID}
 }
 
 // postingSeenMsg reports the mark-seen that opening a thread triggers on its
@@ -718,24 +728,26 @@ func (v *mailView) Update(msg tea.Msg) (tea.Cmd, bool) {
 			return func() tea.Msg { return errMsg{msg.err} }, true
 		}
 		done := notify(msg.action)
-		idx := v.postingIndex(msg.postingID)
-		if idx >= 0 {
-			switch msg.effect {
-			case postingActionNone:
-			case postingActionRemove:
-				v.removePostingAt(idx)
-			case postingActionSeen:
-				v.postingList.markSeen(idx)
-			case postingActionUnseen:
-				v.postingList.markUnseen(idx)
-			case postingActionIgnore:
-				v.postingList.postings[idx].Muted = true
-			case postingActionStopIgnoring:
-				v.postingList.postings[idx].Muted = false
+		for _, postingID := range msg.postings() {
+			idx := v.postingIndex(postingID)
+			if idx >= 0 {
+				switch msg.effect {
+				case postingActionNone:
+				case postingActionRemove:
+					v.removePostingAt(idx)
+				case postingActionSeen:
+					v.postingList.markSeen(idx)
+				case postingActionUnseen:
+					v.postingList.markUnseen(idx)
+				case postingActionIgnore:
+					v.postingList.postings[idx].Muted = true
+				case postingActionStopIgnoring:
+					v.postingList.postings[idx].Muted = false
+				}
 			}
-		}
-		if msg.effect == postingActionRemove {
-			v.removeFromOverlaidLists(msg.postingID)
+			if msg.effect == postingActionRemove {
+				v.removeFromOverlaidLists(postingID)
+			}
 		}
 		// The open thread can file back into the box on screen — out and back while
 		// it stays open — and its row was removed when it first filed away, so the
@@ -1019,10 +1031,11 @@ func (v *mailView) HelpBindings() []helpBinding {
 			{"a", "set aside"},
 			{"d", "feed"},
 			{"p", "paper trail"},
-			{"t", "trash"},
-			{"!", "spam"},
-			ignoreBinding,
 		}
+		if v.trashOffered() {
+			bindings = append(bindings, helpBinding{"t", "trash"})
+		}
+		bindings = append(bindings, helpBinding{"!", "spam"}, ignoreBinding)
 		if v.lastBulkReplyID != 0 {
 			bindings = append(bindings, helpBinding{"ctrl+u", "undo bulk reply"})
 		}
@@ -1058,9 +1071,11 @@ func (v *mailView) HelpBindings() []helpBinding {
 		{"a", "set aside"},
 		{"d", "feed"},
 	}
+	bindings = append(bindings, helpBinding{"p", "paper trail"})
+	if v.trashOffered() {
+		bindings = append(bindings, helpBinding{"t", "trash"})
+	}
 	bindings = append(bindings,
-		helpBinding{"p", "paper trail"},
-		helpBinding{"t", "trash"},
 		helpBinding{"!", "spam"},
 		ignoreBinding,
 		helpBinding{"ctrl+r", "reload"},
@@ -1532,7 +1547,11 @@ func (v *mailView) applySeenPostingAction(msg postingActionDoneMsg) tea.Cmd {
 	if msg.err != nil {
 		return func() tea.Msg { return errMsg{msg.err} }
 	}
-	if idx := postingIndexIn(v.seenList.postings, msg.postingID); idx >= 0 {
+	for _, postingID := range msg.postings() {
+		idx := postingIndexIn(v.seenList.postings, postingID)
+		if idx < 0 {
+			continue
+		}
 		switch msg.effect {
 		case postingActionNone:
 		case postingActionRemove, postingActionUnseen:
@@ -2428,11 +2447,96 @@ func (v *mailView) fileablePosting() *mail.Posting {
 }
 
 func (v *mailView) handlePostingAction(key string) tea.Cmd {
+	if key == "t" || key == "T" {
+		return v.trash()
+	}
 	selected := v.actionList().selectedPosting()
 	if selected == nil {
 		return nil
 	}
 	return v.postingAction(key, *selected, v.postingBoxKind(*selected))
+}
+
+// trashTargets is what t acts on: every selected row when there is a selection, the row
+// under the cursor otherwise. The selection wins even when it is a single row, since the
+// cursor moves away from what was selected.
+func (v *mailView) trashTargets() []mail.Posting {
+	list := v.actionList()
+	if selected := list.selectedPostings(); len(selected) > 0 {
+		return selected
+	}
+	if cursor := list.selectedPosting(); cursor != nil {
+		return []mail.Posting{*cursor}
+	}
+	return nil
+}
+
+// trash files what t acts on into the Trash, in one request whatever the count, the way
+// the web app's toolbar acts on a selection rather than on the row under the cursor. The
+// rows leave the list when HEY answers and take their selection with them; a failure
+// leaves the selection standing for another try.
+func (v *mailView) trash() tea.Cmd {
+	targets := v.trashTargets()
+	if len(targets) == 0 {
+		return nil
+	}
+	if bundles := bundlesIn(targets); bundles > 0 {
+		v.notice = bundleTrashNotice(bundles, len(targets))
+		return nil
+	}
+	ids := make([]int64, len(targets))
+	for i := range targets {
+		ids[i] = targets[i].ID
+	}
+	label := "Thread moved to Trash"
+	if len(ids) > 1 {
+		label = fmt.Sprintf("%d threads moved to Trash", len(ids))
+	}
+	trash := v.doPostingAction(label, postingActionRemove, v.currentBoxID(), ids[0], func() error {
+		return v.vc.sdk.Postings().MoveToTrash(v.vc.ctx, ids...)
+	})
+	return func() tea.Msg {
+		done, ok := trash().(postingActionDoneMsg)
+		if !ok {
+			return nil
+		}
+		done.postingIDs = ids
+		return done
+	}
+}
+
+// trashOffered reports whether the help bar shows t. A bundle row stands for one
+// contact's stream rather than a thread, and HEY trashes through the thread — HEY's
+// `remove_via_topic` skips a posting that has none — so trashing a bundle quietly does
+// nothing while the list reports it gone. HEY's own web app never lets that happen: the
+// Trash button is hidden the moment a bundle is in the selection. The bar drops the key
+// for the same reason. An empty list keeps it, as it always has: there is nothing to
+// refuse yet.
+func (v *mailView) trashOffered() bool {
+	return bundlesIn(v.trashTargets()) == 0
+}
+
+func bundlesIn(postings []mail.Posting) int {
+	bundles := 0
+	for i := range postings {
+		if postings[i].IsBundle {
+			bundles++
+		}
+	}
+	return bundles
+}
+
+// bundleTrashNotice says why t did nothing, and what to do about it when the rest of the
+// selection could still go.
+func bundleTrashNotice(bundles, targets int) string {
+	subject := "A bundle cannot be trashed"
+	if bundles > 1 {
+		subject = fmt.Sprintf("%d bundles cannot be trashed", bundles)
+	}
+	if bundles == targets {
+		return subject
+	}
+	return subject + " — deselect the bundle to trash the rest"
 }
 
 // actionBoxKind is the box kind a list row files out of, empty over a source that
