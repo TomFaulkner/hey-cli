@@ -19,12 +19,13 @@ name: Sync the Nix vendorHash on Dependabot PRs
 # check goes green.
 #
 # Why no `needs:` edge from the auto-merge job, the way basecamp-cli sequences
-# these in one file: there, "Nix flake builds" is not required, so an unordered
-# auto-merge lands the bump red (#697) and breaks main's flake. Here the
-# required check *is* the ordering — a stale head cannot merge — so the edge
-# would buy nothing and would cost something real: it would couple every
-# Dependabot PR's auto-merge, actions and docker bumps included, to the health
-# of a job that only Go bumps need.
+# these in one file: that edge answers an unordered auto-merge landing a stale
+# head red, which a required Nix check already prevents — and both CLIs require
+# it now, whatever basecamp-cli's own header still says. Here the required
+# check *is* the ordering, so the edge would buy nothing and would cost
+# something real: it would couple every Dependabot PR's auto-merge, actions
+# bumps included, to the health of a job that only Go bumps need. Dropping
+# "Nix flake builds" from main-gate would drop that ordering with it.
 #
 # `paths:` is narrow on purpose. It only has to catch what Dependabot's Go
 # bumps touch, and the reusable workflow re-decides "is this a Go bump" from
@@ -38,10 +39,12 @@ name: Sync the Nix vendorHash on Dependabot PRs
 #
 # Needs the cli-release-bot App installed on this repository with
 # contents: write, and its private key stored as a repository *Dependabot*
-# secret named RELEASE_APP_PRIVATE_KEY (Dependabot-triggered runs see only
-# Dependabot secrets) and, for the workflow_dispatch path, as a repository
-# Actions secret of the same name. release.yml's copies live in the `release`
-# environment and are not reachable from here, by design.
+# secret named RELEASE_APP_PRIVATE_KEY, which is what Dependabot-triggered runs
+# see. Both hold. The workflow_dispatch path additionally needs the key as a
+# repository *Actions* secret of the same name and there is none, so that path
+# fails minting the token until someone adds one; the weekly pull_request path
+# does not depend on it. release.yml's copies live in the `release` environment
+# and are not reachable from here, by design.
 
 on:
   pull_request:
