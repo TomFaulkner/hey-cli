@@ -29,7 +29,7 @@ func newEventsCommand() *eventsCommand {
 		Use:   "event",
 		Short: "Read and manage calendar events",
 		Annotations: map[string]string{
-			"agent_notes": "Subcommands: list, day, week, add, edit, delete. \"What's on the schedule today?\" is answered by day, not list: day and week read the span as HEY draws it, with a repeating event expanded into the occurrences inside it, over the calendars switched on in HEY. list reads what calendars hold — every calendar unless --calendar names one — and a repeating event is one row, its series, on the day the series began. An edit is not a patch on HEY's side: it resends the notes, location, link, attached email, reminders and time zones the event already carries, so notes lose their formatting and a countdown is removed unless --countdown names one again.",
+			"agent_notes": "Subcommands: list, day, week, add, edit, delete. \"What's on the schedule today?\" is answered by day, not list: day and week read the span as HEY draws it, with a repeating event expanded into the occurrences inside it, over the calendars switched on in HEY. list reads what calendars hold — every calendar unless --calendar names one — and a repeating event is one row, its series, on the day the series began. An edit is not a patch on HEY's side: it resends the notes, location, link, attached email, reminders and time zones the event already carries, so notes lose their formatting and a countdown is removed unless --countdown names one again. edit <series id> changes a whole series; one day of it is edit <series id> --occurrence <occurrence_id from day/week> --apply-to current|future, which keeps the countdown and refuses to flatten notes unless --allow-plain-notes or --notes is given. --apply-to future starts a new series and requires --repeat with its complete schedule; a preset alone means forever and custom copies an existing opaque schedule (a count-based rule can restart its full count). A virtual day of an opaque custom schedule is read from HEY's Day view and refused if that view no longer serves it. A realized custom day cannot be split safely; use a virtual occurrence, edit that day alone, or edit the whole series. A realized preset occurrence moved away from its series time must be moved back with --apply-to current before a future split. Read the day again afterward for the new series id.",
 		},
 	}
 
@@ -96,7 +96,7 @@ func (c *eventsListCommand) run(cmd *cobra.Command, args []string) error {
 	}
 	notice := output.TruncationNotice(len(events), total)
 
-	return writeEventRows(cmd, events, window.describe(), notice)
+	return writeEventRows(cmd, eventRows(events), window.describe(), notice)
 }
 
 // eventBoundary writes one end of an event: a day for an all-day event, a day and a clock
@@ -150,13 +150,11 @@ func (c *eventsAddCommand) run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := cmd.Context()
-	calendarID, err := c.fields.resolveCalendar(ctx)
+	repeat, err := c.fields.parseRepeat(cmd, false)
 	if err != nil {
 		return err
 	}
-
-	schedule, err := c.fields.newSchedule()
+	countdown, err := c.fields.parseCountdown()
 	if err != nil {
 		return err
 	}
@@ -164,11 +162,20 @@ func (c *eventsAddCommand) run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	repeat, err := c.fields.parseRepeat()
+	if err = c.fields.validateExplicitScheduleFlags(cmd); err != nil {
+		return err
+	}
+	schedule, err := c.fields.newSchedule()
 	if err != nil {
 		return err
 	}
-	countdown, err := c.fields.parseCountdown()
+	err = checkRepeatStarts(repeat, schedule.startsAt)
+	if err != nil {
+		return err
+	}
+
+	ctx := cmd.Context()
+	calendarID, err := c.fields.resolveCalendar(ctx)
 	if err != nil {
 		return err
 	}
@@ -213,6 +220,13 @@ func (c *eventsAddCommand) run(cmd *cobra.Command, args []string) error {
 type eventsEditCommand struct {
 	cmd    *cobra.Command
 	fields eventFields
+
+	// occurrence and applyTo turn the edit into one of a repeating event's days: the
+	// occurrence_id a day or a week listing serves, and how much of the series the change
+	// reaches. allowPlainNotes accepts what that write cannot keep; see editOccurrence.
+	occurrence      string
+	applyTo         string
+	allowPlainNotes bool
 }
 
 func newEventsEditCommand() *eventsEditCommand {
@@ -229,16 +243,60 @@ countdown is not served at all, so an edit removes one unless --countdown names 
 
 The event is found by reading the calendars it might be on, which is one request each and
 covers the pages HEY answers with. Give the day it starts as [date] to look on that day
-alone, or --calendar to look on one calendar.`,
+alone, or --calendar to look on one calendar.
+
+An id alone changes the whole event, a repeating series included. One day of a series is
+changed with --occurrence, which takes the occurrence_id 'hey event day' and 'hey event
+week' serve (<series id>_<YYYY-MM-DD>, and the series must be the id given), and
+--apply-to, which is required with it: 'current' changes that day alone and 'future'
+changes it and every day after it, the two choices HEY's own form offers. The day is read
+on its own date, so [date] can be left out or must name it. A change to --repeat,
+--repeat-until or --repeat-times cannot apply to one day, so 'current' refuses those
+flags. 'future' starts a new series and requires --repeat to state its complete schedule:
+combine a preset with --repeat-times or --repeat-until for a finite series, use a preset
+alone for one that continues forever, or use --repeat custom to copy an existing opaque
+schedule. A custom count-based rule can restart its full count on the replacement. HEY
+accepts the replacement's submitted start even when it overlaps an earlier occurrence, so
+choose its date and time deliberately. A virtual day of an opaque custom schedule takes its exact time from HEY's Day view and is
+refused if that view no longer serves it. A realized day of a custom schedule cannot be split
+safely, because HEY does not serve the rule's occurrence boundary; use a virtual occurrence,
+edit that day alone, or edit the whole series. A realized preset occurrence moved
+away from its series time must be moved back with a current-only edit before it can be split
+safely. The days from this one on
+get a new series id.
+
+An occurrence edit keeps more than a whole-event edit does, and refuses what it cannot
+keep. A countdown owned by the day is read back and sent again; an inherited series
+countdown is left inherited on a current-only edit and copied to the replacement series on
+a future edit. It survives unless --countdown 0 removes it — and one day of a series with
+a countdown cannot lose it alone, since HEY shows a day the series' countdown whenever it
+has none of its own, so that is refused. Notes are still only served as plain text, so an
+occurrence edit that would send
+formatted notes back as text refuses unless --allow-plain-notes accepts that or --notes
+replaces them. A 'future' edit records the new series from the series' own guest list,
+so a day that had come to have guests of its own is refused until --invite names the new
+series' list. The day is read over every calendar, so here --calendar is only where the
+day is moved to; a day already moved elsewhere stays there. A virtual occurrence lists
+its series in id and parent_id; a day HEY has written out on its own keeps its own event id
+in id and recording_id, with the series in parent_id. That own id edits and deletes the
+day alone. One thing no edit can keep: an attached email you cannot read is not served, so
+it is detached by any edit, whole event
+or one day.`,
 		Example: `  hey event edit 4821 --title "Design review (moved)"
   hey event edit 4821 --starts-on 2026-09-04 --start-time 15:00
   hey event edit 4821 2026-09-02 --location "Studio, 3rd floor"
-  hey event edit 4821 --circle=false`,
+  hey event edit 4821 --circle=false
+  hey event edit 4821 --occurrence 4821_2026-09-15 --apply-to current --start-time 15:00 --json
+  hey event edit 4821 --occurrence 4821_2026-09-15 --apply-to future --repeat every_week --repeat-times 8 --location "Studio, 3rd floor" --allow-plain-notes`,
 		RunE: eventsEditCommand.run,
 		Args: cobra.RangeArgs(1, 2),
 	}
 
 	eventsEditCommand.fields.registerFlags(eventsEditCommand.cmd)
+	flags := eventsEditCommand.cmd.Flags()
+	flags.StringVar(&eventsEditCommand.occurrence, "occurrence", "", "One day of a repeating event, by the occurrence_id 'hey event day' serves (<series id>_<YYYY-MM-DD>)")
+	flags.StringVar(&eventsEditCommand.applyTo, "apply-to", "", "How much of the series an --occurrence edit reaches: current (that day alone) or future (that day and every one after it)")
+	flags.BoolVar(&eventsEditCommand.allowPlainNotes, "allow-plain-notes", false, "Let an --occurrence edit send notes it is not changing back as plain text, losing their formatting")
 
 	return eventsEditCommand
 }
@@ -261,7 +319,34 @@ func (c *eventsEditCommand) run(cmd *cobra.Command, args []string) error {
 		on = args[1]
 	}
 
+	occurrence, err := c.parseOccurrence(cmd, id, on)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
+	if occurrence != nil {
+		return c.editOccurrence(ctx, cmd, *occurrence)
+	}
+
+	repeat, err := c.fields.parseRepeat(cmd, false)
+	if err != nil {
+		return err
+	}
+	countdown, err := c.fields.parseCountdown()
+	if err != nil {
+		return err
+	}
+	if err = c.fields.validateExplicitScheduleFlags(cmd); err != nil {
+		return err
+	}
+	var explicitReminders []time.Duration
+	if cmd.Flags().Changed("remind") {
+		explicitReminders, err = c.fields.parseReminders()
+		if err != nil {
+			return err
+		}
+	}
+
 	event, err := c.findEvent(ctx, id, on)
 	if err != nil {
 		return err
@@ -271,17 +356,16 @@ func (c *eventsEditCommand) run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	repeat, err := c.fields.parseRepeat()
+	err = checkRepeatStarts(repeat, schedule.startsAt)
 	if err != nil {
 		return err
 	}
-	countdown, err := c.fields.parseCountdown()
-	if err != nil {
-		return err
-	}
-	reminders, err := c.fields.remindersFrom(cmd, event)
-	if err != nil {
-		return err
+	reminders := explicitReminders
+	if !cmd.Flags().Changed("remind") {
+		reminders, err = c.fields.remindersFrom(cmd, event)
+		if err != nil {
+			return err
+		}
 	}
 
 	changes := hey.UpdateCalendarEventParams{
@@ -334,18 +418,7 @@ func (c *eventsEditCommand) run(cmd *cobra.Command, args []string) error {
 // never contain a timed event, which is how editing an event by its own day used to
 // answer not-found. Reading a day too many is harmless here: the event is matched by id.
 func (c *eventsEditCommand) findEvent(ctx context.Context, id int64, on string) (generated.Recording, error) {
-	endsOn := on
-	if day, err := time.Parse("2006-01-02", on); err == nil {
-		endsOn = day.AddDate(0, 0, 1).Format("2006-01-02")
-	}
-	filter := recordingFilter{
-		calendar:         c.fields.calendar,
-		startsOn:         on,
-		endsOn:           endsOn,
-		defaultWindow:    func(now time.Time) (time.Time, time.Time) { return now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0) },
-		defaultCalendars: allCalendarIDs,
-	}
-	window, err := filter.resolve(ctx)
+	window, err := c.searchWindow(ctx, on)
 	if err != nil {
 		return generated.Recording{}, err
 	}
@@ -362,6 +435,24 @@ func (c *eventsEditCommand) findEvent(ctx context.Context, id int64, on string) 
 
 	return generated.Recording{}, apierr.ErrNotFoundHint("event", strconv.FormatInt(id, 10),
 		fmt.Sprintf("hey event edit %d <YYYY-MM-DD>  reads the day it starts on", id))
+}
+
+// searchWindow is where an edit looks for its event: the day given, read as [day, day+1),
+// or a window wide enough to cover an event somebody is editing, over the calendar
+// --calendar names or every one of them.
+func (c *eventsEditCommand) searchWindow(ctx context.Context, on string) (recordingWindow, error) {
+	endsOn := on
+	if day, err := time.Parse(dateLayout, on); err == nil {
+		endsOn = day.AddDate(0, 0, 1).Format(dateLayout)
+	}
+	filter := recordingFilter{
+		calendar:         c.fields.calendar,
+		startsOn:         on,
+		endsOn:           endsOn,
+		defaultWindow:    func(now time.Time) (time.Time, time.Time) { return now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0) },
+		defaultCalendars: allCalendarIDs,
+	}
+	return filter.resolve(ctx)
 }
 
 // delete
@@ -446,7 +537,7 @@ func (f *eventFields) registerFlags(cmd *cobra.Command) {
 	flags.StringVar(&f.link, "link", "", "Meeting or reference URL")
 	flags.StringArrayVar(&f.invites, "invite", nil, "Email address to invite (repeatable, replaces the guest list)")
 	flags.BoolVar(&f.circle, "circle", false, "Circle the event")
-	flags.StringVar(&f.repeat, "repeat", "", "Repeat: every_day, every_weekday, every_week, every_other_week, every_day_of_month, every_year")
+	flags.StringVar(&f.repeat, "repeat", "", "Repeat: every_day, every_weekday, every_week, every_other_week, every_day_of_month, every_year; custom only copies an opaque schedule in a future occurrence edit")
 	flags.StringVar(&f.repeatUntil, "repeat-until", "", "Stop repeating on this date (YYYY-MM-DD)")
 	flags.IntVar(&f.repeatTimes, "repeat-times", 0, "Stop repeating after this many occurrences")
 	flags.IntVar(&f.countdown, "countdown", 0, "Count down this many units to the event")
@@ -523,6 +614,50 @@ func (f *eventFields) newSchedule() (eventSchedule, error) {
 	}, nil
 }
 
+// validateExplicitScheduleFlags checks every schedule value that needs no stored event.
+// Relationships involving an omitted half are checked later, after scheduleFrom fills it in.
+func (f *eventFields) validateExplicitScheduleFlags(cmd *cobra.Command) error {
+	flags := cmd.Flags()
+	if flags.Changed("starts-on") {
+		if _, err := parseDateArg("starts-on date", f.startsOn); err != nil {
+			return err
+		}
+	}
+	if flags.Changed("ends-on") {
+		if _, err := parseDateArg("ends-on date", f.endsOn); err != nil {
+			return err
+		}
+	}
+	if flags.Changed("starts-on") && flags.Changed("ends-on") {
+		if err := checkEventDates(f.startsOn, f.endsOn); err != nil {
+			return err
+		}
+	}
+	if flags.Changed("start-time") {
+		if _, err := parseEventClock("start-time", f.startTime, "14:30"); err != nil {
+			return err
+		}
+	}
+	if flags.Changed("end-time") {
+		if _, err := parseEventClock("end-time", f.endTime, "15:30"); err != nil {
+			return err
+		}
+	}
+	if flags.Changed("time-zone") {
+		const hint = "an IANA time zone name, for example America/New_York"
+		if f.timeZone == "" {
+			return apierr.ErrUsageHint("--time-zone needs a time zone", hint)
+		}
+		if f.timeZone == "Local" {
+			return apierr.ErrUsageHint("invalid time-zone: Local", hint)
+		}
+		if _, err := time.LoadLocation(f.timeZone); err != nil {
+			return apierr.ErrUsageHint(fmt.Sprintf("invalid time-zone: %s", f.timeZone), hint)
+		}
+	}
+	return nil
+}
+
 // scheduleFrom is when an edited event happens: whatever the flags name, and the event's own
 // answer for everything they do not.
 func (f *eventFields) scheduleFrom(cmd *cobra.Command, event generated.Recording) (eventSchedule, error) {
@@ -586,19 +721,26 @@ const eventDuration = time.Hour
 
 // clockTimes reads the pair of HH:MM times, defaulting the end to an hour after the start.
 func (f *eventFields) clockTimes(startTime, endTime string) (string, string, error) {
-	start, err := time.Parse(clockLayout, startTime)
+	start, err := parseEventClock("start-time", startTime, "14:30")
 	if err != nil {
-		return "", "", apierr.ErrUsageHint(fmt.Sprintf("invalid start-time: %s", startTime),
-			"times are HH:MM on a 24-hour clock, for example 14:30")
+		return "", "", err
 	}
 	if endTime == "" {
 		return startTime, start.Add(eventDuration).Format(clockLayout), nil
 	}
-	if _, err := time.Parse(clockLayout, endTime); err != nil {
-		return "", "", apierr.ErrUsageHint(fmt.Sprintf("invalid end-time: %s", endTime),
-			"times are HH:MM on a 24-hour clock, for example 15:30")
+	if _, err := parseEventClock("end-time", endTime, "15:30"); err != nil {
+		return "", "", err
 	}
 	return startTime, endTime, nil
+}
+
+func parseEventClock(name, value, example string) (time.Time, error) {
+	clock, err := time.Parse(clockLayout, value)
+	if err != nil {
+		return time.Time{}, apierr.ErrUsageHint(fmt.Sprintf("invalid %s: %s", name, value),
+			fmt.Sprintf("times are HH:MM on a 24-hour clock, for example %s", example))
+	}
+	return clock, nil
 }
 
 // clockLayout is the time of day HEY's form takes, and the one a reader types.
@@ -650,13 +792,32 @@ func checkEventDates(startsOn, endsOn string) error {
 
 // parseRepeat reads the recurrence flags into the three fields HEY takes. Nil is no change,
 // which on a whole-event update leaves the recurrence as it was.
-func (f *eventFields) parseRepeat() (*hey.RepeatParams, error) {
+func (f *eventFields) parseRepeat(cmd *cobra.Command, allowCustom bool) (*hey.RepeatParams, error) {
+	flags := cmd.Flags()
+	repeatGiven := flags.Changed("repeat")
+	untilGiven := flags.Changed("repeat-until")
+	timesGiven := flags.Changed("repeat-times")
+	frequencyHint := "one of every_day, every_weekday, every_week, every_other_week, every_day_of_month, every_year"
+	if allowCustom {
+		frequencyHint += ", or custom to copy an existing opaque schedule"
+	}
+	if repeatGiven && f.repeat == "" {
+		return nil, apierr.ErrUsageHint("--repeat needs a frequency", frequencyHint)
+	}
+	if untilGiven && f.repeatUntil == "" {
+		return nil, apierr.ErrUsageHint("--repeat-until needs a date", "a date in YYYY-MM-DD form")
+	}
 	if f.repeat == "" {
-		if f.repeatUntil == "" && f.repeatTimes == 0 {
+		if !untilGiven && !timesGiven {
 			return nil, nil
 		}
 		return nil, apierr.ErrUsageHint("repeat-until and repeat-times need --repeat",
 			"hey event add \"Standup\" --repeat every_weekday --repeat-times 20")
+	}
+	// A count of nothing is not "forever", which is what the zero value would have meant.
+	if timesGiven && f.repeatTimes < 1 {
+		return nil, apierr.ErrUsageHint(fmt.Sprintf("repeat-times %d is not a number of occurrences", f.repeatTimes),
+			"a count of at least 1, or --repeat-until for a last day")
 	}
 
 	frequencies := map[string]hey.RepeatFrequency{
@@ -667,14 +828,22 @@ func (f *eventFields) parseRepeat() (*hey.RepeatParams, error) {
 		"every_day_of_month": hey.RepeatEveryDayOfMonth,
 		"every_year":         hey.RepeatEveryYear,
 	}
+	if allowCustom {
+		frequencies["custom"] = hey.RepeatCustom
+	}
 	frequency, ok := frequencies[f.repeat]
 	if !ok {
-		return nil, apierr.ErrUsageHint(fmt.Sprintf("invalid repeat: %s", f.repeat),
-			"one of every_day, every_weekday, every_week, every_other_week, every_day_of_month, every_year")
+		return nil, apierr.ErrUsageHint(fmt.Sprintf("invalid repeat: %s", f.repeat), frequencyHint)
 	}
 
 	if f.repeatUntil != "" && f.repeatTimes > 0 {
 		return nil, apierr.ErrUsage("--repeat-until and --repeat-times are mutually exclusive")
+	}
+	if frequency == hey.RepeatCustom {
+		if untilGiven || timesGiven {
+			return nil, apierr.ErrUsage("--repeat custom copies the existing schedule, so it cannot be combined with --repeat-until or --repeat-times")
+		}
+		return &hey.RepeatParams{Frequency: hey.RepeatCustom}, nil
 	}
 
 	repeat := &hey.RepeatParams{Frequency: frequency, Until: hey.RepeatUntilForever}
@@ -690,6 +859,27 @@ func (f *eventFields) parseRepeat() (*hey.RepeatParams, error) {
 		repeat.Count = f.repeatTimes
 	}
 	return repeat, nil
+}
+
+// checkRepeatStarts keeps a recurrence's last day at or after its first. HEY turns a
+// schedule that has no occurrence after its start into a one-off event, so accepting an
+// earlier --repeat-until would silently stop a series while reporting a recurring write.
+func checkRepeatStarts(repeat *hey.RepeatParams, startsAt string) error {
+	if repeat == nil || repeat.Until != hey.RepeatUntilDate {
+		return nil
+	}
+	start, err := parseDateArg("starts-on date", startsAt)
+	if err != nil {
+		return err
+	}
+	until, err := parseDateArg("repeat-until date", repeat.UntilDate)
+	if err != nil {
+		return err
+	}
+	if until.Before(start) {
+		return apierr.ErrUsage(fmt.Sprintf("repeat-until %s is before starts-on %s", repeat.UntilDate, startsAt))
+	}
+	return nil
 }
 
 // parseCountdown reads the countdown flags. The zero value is no countdown, and on an update

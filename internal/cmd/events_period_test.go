@@ -51,6 +51,85 @@ func TestEventsDayExpandsRecurringEvents(t *testing.T) {
 	if first["id"] != float64(204) {
 		t.Errorf("occurrence id = %v, want the series, which is what edit and delete take", first["id"])
 	}
+	if _, ok := first["recording_id"]; ok {
+		t.Errorf("recording_id = %v, want no own id for a virtual occurrence", first["recording_id"])
+	}
+}
+
+// A day an earlier edit has written out has an id of its own, and HEY's event routes act
+// on that id for that day alone. The published id keeps that established meaning while
+// recording_id makes the distinction from a virtual occurrence explicit.
+func TestEventsDayKeepsARealizedOccurrenceID(t *testing.T) {
+	var deletedPath string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/calendar/days/2026-09-15.json":
+			_, _ = io.WriteString(w, `{"kind":"day","starts_at":"2026-09-15T00:00:00Z","ends_at":"2026-09-15T23:59:59Z","recordings":{`+
+				`"Calendar::Event":[`+
+				`{"id":9001,"parent_id":4821,"occurrence_id":"4821_2026-09-15","title":"Design review (with the vendor)","starts_at":"2026-09-15T13:30:00Z","ends_at":"2026-09-15T14:30:00Z","type":"Calendar::Event","calendar":{"id":9,"name":"Work"}}`+
+				`]}}`)
+		case r.Method == http.MethodDelete:
+			deletedPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("request = %s %s, want the day read or an event delete", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	response, err := runJSONCommand(t, handler, "event", "day", "2026-09-15")
+	if err != nil {
+		t.Fatalf("execute event day: %v", err)
+	}
+	events, ok := response.Data.([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("data = %#v, want the one event", response.Data)
+	}
+	row, ok := events[0].(map[string]any)
+	if !ok || row["id"] != float64(9001) || row["recording_id"] != float64(9001) || row["parent_id"] != float64(4821) || row["occurrence_id"] != "4821_2026-09-15" {
+		t.Errorf("row = %#v, want the day's own id and recording_id with its series in parent_id", events[0])
+	}
+
+	if _, err := runJSONCommand(t, handler, "event", "delete", fmt.Sprintf("%.0f", row["id"])); err != nil {
+		t.Fatalf("delete the id from the day response: %v", err)
+	}
+	if deletedPath != "/calendar/events/9001.json" {
+		t.Errorf("delete path = %q, want the realized day alone", deletedPath)
+	}
+}
+
+// Styled period output carries every identifier needed to act on an occurrence. A moved
+// realized day cannot reconstruct its occurrence id from the date drawn in the table, and
+// its own recording id is what edits or deletes that day without the rest of the series.
+func TestEventsPeriodStyledPublishesOccurrenceIdentifiers(t *testing.T) {
+	for _, tt := range []struct {
+		name, period, path string
+	}{
+		{name: "day", period: "day", path: "/calendar/days/2026-09-15.json"},
+		{name: "week", period: "week", path: "/calendar/weeks/2026-09-15.json"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			styled, err := runStyledCommand(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != tt.path {
+					t.Errorf("request = %s %s, want %s", r.Method, r.URL.Path, tt.path)
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"kind":"`+tt.period+`","recordings":{"Calendar::Event":[`+
+					`{"parent_id":204,"occurrence_id":"204_2026-09-15","title":"Standup","starts_at":"2026-09-15T09:15:00Z","ends_at":"2026-09-15T09:30:00Z","type":"Calendar::Event","calendar":{"id":9,"name":"Work"}},`+
+					`{"id":9001,"parent_id":4821,"occurrence_id":"4821_2026-09-13","title":"Design review","starts_at":"2026-09-15T13:30:00Z","ends_at":"2026-09-15T14:30:00Z","type":"Calendar::Event","calendar":{"id":9,"name":"Work"}}]}}`)
+			}), "event", tt.name, "2026-09-15")
+			if err != nil {
+				t.Fatalf("execute event %s: %v", tt.name, err)
+			}
+			for _, want := range []string{"Series ID", "Occurrence ID", "Recording ID", "204_2026-09-15", "4821_2026-09-13", "9001"} {
+				if !strings.Contains(styled, want) {
+					t.Errorf("styled output does not contain %q:\n%s", want, styled)
+				}
+			}
+		})
+	}
 }
 
 func TestEventsWeekReadsTheWeekPeriod(t *testing.T) {
