@@ -131,6 +131,27 @@ func TestSentCommandMarkdownReportsRecipientsURLAndUnavailableDeliveryTime(t *te
 	}
 }
 
+func TestSentCommandPreservesEmptySummaryFields(t *testing.T) {
+	body := strings.Replace(sentTopicsJSON, `"summary":"Here are the decisions and owners from today's planning session."`, `"summary":""`, 1)
+
+	response, err := runJSONCommand(t, sentTopicsHandler(t, body), "sent")
+	if err != nil {
+		t.Fatalf("execute sent --json: %v", err)
+	}
+	rows := decodeSentData[[]map[string]any](t, response.Data)
+	if summary, ok := rows[0]["summary"]; !ok || summary != "" {
+		t.Errorf("summary = %#v, present = %v", summary, ok)
+	}
+
+	markdown, err := runFormattedCommand(t, sentTopicsHandler(t, body), []string{"--markdown"}, "sent")
+	if err != nil {
+		t.Fatalf("execute sent --markdown: %v", err)
+	}
+	if !strings.Contains(markdown, " summary |") {
+		t.Errorf("Markdown output has no summary column:\n%s", markdown)
+	}
+}
+
 func TestSentCommandStyledShowsContinuationAfterAnEmptyPage(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -221,7 +242,7 @@ func TestSentCommandLimitReadsEnoughPagesAndTrims(t *testing.T) {
 	if got := strings.Join(pages, ","); got != ",2" {
 		t.Errorf("pages = %q, want first page then 2", got)
 	}
-	if response.Notice != "Showing 2 of 3 results. Use --all to see everything." {
+	if response.Notice != "Showing 2 sent messages. Use --all to see everything." {
 		t.Errorf("notice = %q", response.Notice)
 	}
 }

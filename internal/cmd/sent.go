@@ -37,7 +37,7 @@ type sentMessage struct {
 	To      []sentRecipient `json:"to"`
 	CC      []sentRecipient `json:"cc"`
 	BCC     []sentRecipient `json:"bcc"`
-	Summary string          `json:"summary,omitempty"`
+	Summary string          `json:"summary"`
 	SentAt  *time.Time      `json:"sent_at"`
 	AppURL  string          `json:"app_url"`
 }
@@ -46,7 +46,7 @@ type sentTableRow struct {
 	ID         int64  `json:"id"`
 	Subject    string `json:"subject"`
 	Recipients string `json:"recipients"`
-	Summary    string `json:"summary,omitempty"`
+	Summary    string `json:"summary"`
 	Sent       string `json:"sent"`
 	AppURL     string `json:"app_url"`
 }
@@ -100,7 +100,11 @@ func (c *sentCommand) run(cmd *cobra.Command, _ []string) error {
 	if c.limit > 0 && !c.all && len(messages) > c.limit {
 		messages = messages[:c.limit]
 		nextPage = ""
-		notice = output.TruncationNotice(len(messages), len(collected.Items))
+		if collected.Cursor != "" {
+			notice = sentListingNotice(len(messages), collected.Read, collected.Cursor, false)
+		} else {
+			notice = output.TruncationNotice(len(messages), len(collected.Items))
+		}
 	}
 
 	format := writer.EffectiveFormat()
