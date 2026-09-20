@@ -102,11 +102,12 @@ func TestSentCommandStyledMatchesHEYRecipientSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute sent --styled: %v", err)
 	}
+	wantDate := time.Date(2026, time.September, 19, 14, 30, 0, 0, time.UTC).Local().Format("2006-01-02")
 	for _, want := range []string{
 		"Quarterly planning follow-up",
 		"Me → Sarah Chen + 2",
 		"Here are the decisions and owners",
-		"2026-09-19",
+		wantDate,
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("styled output missing %q:\n%s", want, stdout)
@@ -116,6 +117,7 @@ func TestSentCommandStyledMatchesHEYRecipientSummary(t *testing.T) {
 
 func TestSentCommandMarkdownReportsRecipientsURLAndUnavailableDeliveryTime(t *testing.T) {
 	body := strings.Replace(sentTopicsJSON, `"active_at":"2026-09-19T14:30:00Z",`, "", 1)
+	body = strings.Replace(body, `"created_at":"2026-09-18T09:00:00Z",`, "", 1)
 	markdown, err := runFormattedCommand(t, sentTopicsHandler(t, body), []string{"--markdown"}, "sent")
 	if err != nil {
 		t.Fatalf("execute sent --markdown: %v", err)
@@ -167,6 +169,41 @@ func TestSentCommandStyledShowsContinuationAfterAnEmptyPage(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("styled output missing %q:\n%s", want, stdout)
 		}
+	}
+}
+
+func TestSentCommandAllContinuesAfterAnEmptyPageWithACursor(t *testing.T) {
+	var pages []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch page {
+		case "":
+			w.Header().Set("Link", `</topics/sent.json?page=cursor-2>; rel="next"`)
+			_, _ = io.WriteString(w, sentTopicsJSON)
+		case "cursor-2":
+			w.Header().Set("Link", `</topics/sent.json?page=cursor-3>; rel="next"`)
+			_, _ = io.WriteString(w, `{"title":"Sent Mail","topics":[]}`)
+		default:
+			t.Errorf("unexpected page %q", page)
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+
+	response, err := runJSONCommand(t, handler, "sent", "--all")
+	if err != nil {
+		t.Fatalf("execute sent --all: %v", err)
+	}
+	if got := strings.Join(pages, ","); got != ",cursor-2" {
+		t.Errorf("pages = %q, want first page then cursor-2", got)
+	}
+	if response.Notice != "Showing 1 sent message. Continue with --page cursor-3." {
+		t.Errorf("notice = %q", response.Notice)
+	}
+	if got := response.Meta["next_page"]; got != "cursor-3" {
+		t.Errorf("next_page = %#v", got)
 	}
 }
 
@@ -289,7 +326,7 @@ func TestSentCommandPreservesOpaquePageCursor(t *testing.T) {
 	}
 }
 
-func TestSentCommandDoesNotUseCreationTimeAsDeliveryTime(t *testing.T) {
+func TestSentCommandFallsBackToCreationTimeWhenDeliveryTimeIsMissing(t *testing.T) {
 	body := strings.Replace(sentTopicsJSON, `"active_at":"2026-09-19T14:30:00Z",`, "", 1)
 	response, err := runJSONCommand(t, sentTopicsHandler(t, body), "sent")
 	if err != nil {
@@ -297,13 +334,16 @@ func TestSentCommandDoesNotUseCreationTimeAsDeliveryTime(t *testing.T) {
 	}
 
 	rows := decodeSentData[[]sentTestRow](t, response.Data)
-	if rows[0].SentAt != nil {
-		t.Errorf("sent_at = %v, want null", rows[0].SentAt)
+	if rows[0].SentAt == nil {
+		t.Fatal("sent_at is nil")
+	}
+	if got := rows[0].SentAt.Format(time.RFC3339); got != "2026-09-18T09:00:00Z" {
+		t.Errorf("sent_at = %q", got)
 	}
 }
 
 func TestSentListingNoticeSanitizesCursor(t *testing.T) {
-	notice := sentListingNotice(100, 100, "cursor-\x1b[31mnext", true)
+	notice := sentListingNotice(100, 100, "cursor-\x1b[31mnext", true, false)
 	if strings.ContainsRune(notice, '\x1b') {
 		t.Errorf("notice contains escape byte: %q", notice)
 	}

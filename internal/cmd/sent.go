@@ -96,12 +96,12 @@ func (c *sentCommand) run(cmd *cobra.Command, _ []string) error {
 
 	messages := makeSentMessages(collected.Items)
 	nextPage := collected.Cursor
-	notice := sentListingNotice(len(messages), collected.Read, nextPage, collected.Truncated)
+	notice := sentListingNotice(len(messages), collected.Read, nextPage, collected.Truncated, c.all)
 	if c.limit > 0 && !c.all && len(messages) > c.limit {
 		messages = messages[:c.limit]
 		nextPage = ""
 		if collected.Cursor != "" {
-			notice = sentListingNotice(len(messages), collected.Read, collected.Cursor, false)
+			notice = sentListingNotice(len(messages), collected.Read, collected.Cursor, false, false)
 		} else {
 			notice = output.TruncationNotice(len(messages), len(collected.Items))
 		}
@@ -152,9 +152,13 @@ func makeSentMessages(topics []generated.Topic) []sentMessage {
 	for _, topic := range topics {
 		entry := topic.LatestEntry
 		var sentAt *time.Time
-		if !entry.ActiveAt.IsZero() {
+		switch {
+		case !entry.ActiveAt.IsZero():
 			activeAt := entry.ActiveAt
 			sentAt = &activeAt
+		case !entry.CreatedAt.IsZero():
+			createdAt := entry.CreatedAt
+			sentAt = &createdAt
 		}
 		messages = append(messages, sentMessage{
 			ID:      topic.Id,
@@ -246,10 +250,12 @@ func formatSentTimestamp(sentAt *time.Time) string {
 	return formatTimestamp(sentAt.Local())
 }
 
-func sentListingNotice(shown, pages int, nextPage string, truncated bool) string {
+func sentListingNotice(shown, pages int, nextPage string, truncated, all bool) string {
 	switch {
 	case truncated:
 		return fmt.Sprintf("Sent listing stopped after %d pages. Continue with --page %s.", pages, terminal.SanitizeLine(nextPage))
+	case all && nextPage != "":
+		return fmt.Sprintf("Showing %d %s. Continue with --page %s.", shown, sentMessageNoun(shown), terminal.SanitizeLine(nextPage))
 	case nextPage != "":
 		return fmt.Sprintf("Showing %d %s. Use --all to see everything.", shown, sentMessageNoun(shown))
 	default:
