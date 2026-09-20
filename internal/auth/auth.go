@@ -48,9 +48,10 @@ type Manager struct {
 	// delete, so this process remembers not to send it again. Guarded by mu.
 	refusedRefreshToken string
 
-	// credentialCleared runs after the manager has deleted a credential on its own
-	// verdict, so the owner of the response cache can drop what that credential
-	// fetched. Logout is not that: its callers already clear the cache themselves.
+	// credentialCleared runs after the manager has deleted a credential, or
+	// replaced it with a signed-out record, on its own verdict. The owner of the
+	// response cache can then drop what that credential fetched. Logout is not
+	// that: its callers already clear the cache themselves.
 	credentialCleared func()
 }
 
@@ -312,9 +313,9 @@ func (m *Manager) LoginWithCookie(cookie string) error {
 }
 
 // OnCredentialCleared registers what to run when the manager clears a credential
-// on its own — today, when the server has refused the refresh token. It does not
-// run for Logout, whose callers clear the cache themselves, and not when the store
-// refused the deletion, because the credential is then still there to be used.
+// on its own — today, when the server has refused the refresh token. Replacing a
+// credential with a signed-out record after deletion fails counts as clearing it.
+// Logout does not: its callers clear the cache themselves.
 func (m *Manager) OnCredentialCleared(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -401,6 +402,9 @@ func (m *Manager) refreshLocked(ctx context.Context, creds *Credentials) error {
 		return nil
 	}
 	creds = cloneCredentials(stored)
+	if creds.AccessToken == "" && creds.RefreshToken == "" && creds.SessionCookie == "" {
+		return errNoCredential("stored credentials are signed out", nil)
+	}
 
 	// Cookie-based auth has nothing to refresh. The fresh read above still lets
 	// a 401 adopt a cookie another process stored before the SDK retries.
@@ -486,10 +490,22 @@ func (m *Manager) accountForRefreshFailure(err error, sentRefreshToken string) e
 	// Forget it under the lock that already spans this load-refresh-save, so the
 	// next command asks for a login instead of re-sending it.
 	if delErr := m.store.delete(m.baseURL); delErr != nil {
-		// The credential is still on disk for the next command to load, so the
-		// refusal is remembered here instead.
+		// Keep the process-local guard even if the durable fallback also fails.
 		m.refusedRefreshToken = sentRefreshToken
-		return errRefusedGrant(delErr)
+
+		// The keyring can occasionally refuse a delete while still allowing a
+		// write. Replace the dead grant with a signed-out record so another
+		// process cannot load and submit it again. A later login overwrites this
+		// through the ordinary save path.
+		tombstone := &Credentials{}
+		if saveErr := m.store.save(m.baseURL, tombstone); saveErr != nil {
+			return errRefusedGrant(errors.Join(delErr, fmt.Errorf("replace refused credential: %w", saveErr)))
+		}
+		m.cachedCredentials = cloneCredentials(tombstone)
+		if m.credentialCleared != nil {
+			m.credentialCleared()
+		}
+		return errRefusedGrant(nil)
 	}
 	m.cachedCredentials = nil
 	// Cached mail must not outlive the credential that fetched it, here as much
