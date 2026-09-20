@@ -153,6 +153,41 @@ func TestSentCommandAllFollowsNextPageLink(t *testing.T) {
 	}
 }
 
+func TestSentCommandLimitReadsEnoughPagesAndTrims(t *testing.T) {
+	var pages []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "":
+			w.Header().Set("Link", `</topics/sent.json?page=2>; rel="next"`)
+			_, _ = io.WriteString(w, sentTopicsPage(42))
+		case "2":
+			w.Header().Set("Link", `</topics/sent.json?page=3>; rel="next"`)
+			_, _ = io.WriteString(w, sentTopicsPage(43, 44))
+		default:
+			t.Errorf("unexpected page %q", page)
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	})
+
+	response, err := runJSONCommand(t, handler, "sent", "--limit", "2")
+	if err != nil {
+		t.Fatalf("execute sent --limit 2: %v", err)
+	}
+	rows := decodeSentData[[]sentTestRow](t, response.Data)
+	if len(rows) != 2 || rows[0].ID != 42 || rows[1].ID != 43 {
+		t.Fatalf("rows = %#v", rows)
+	}
+	if got := strings.Join(pages, ","); got != ",2" {
+		t.Errorf("pages = %q, want first page then 2", got)
+	}
+	if response.Notice != "Showing 2 of 3 results. Use --all to see everything." {
+		t.Errorf("notice = %q", response.Notice)
+	}
+}
+
 func TestSentCommandIDsAndCountUseThreadIDs(t *testing.T) {
 	handler := sentTopicsHandler(t, sentTopicsJSON)
 
@@ -180,6 +215,14 @@ func TestSentCommandRejectsInvalidPage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--page must be at least 1") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func sentTopicsPage(ids ...int64) string {
+	rows := make([]string, len(ids))
+	for i, id := range ids {
+		rows[i] = fmt.Sprintf(`{"id":%d,"name":"Planning follow-up %d","app_url":"https://app.hey.com/topics/%d/entries/99","latest_entry":{"id":99,"summary":"Decisions and owners.","active_at":"2026-09-19T14:30:00Z","addressed":{"directly":[],"copied":[],"blindcopied":[]}}}`, id, id, id)
+	}
+	return `{"title":"Sent Mail","topics":[` + strings.Join(rows, ",") + `]}`
 }
 
 func sentTopicsHandler(t *testing.T, body string) http.Handler {
