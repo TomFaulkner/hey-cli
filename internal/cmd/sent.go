@@ -13,6 +13,7 @@ import (
 
 	"github.com/basecamp/hey-cli/internal/apierr"
 	"github.com/basecamp/hey-cli/internal/output"
+	"github.com/basecamp/hey-cli/internal/terminal"
 )
 
 // maxSentPages bounds one invocation even if the server returns a bad pagination loop.
@@ -22,7 +23,7 @@ type sentCommand struct {
 	cmd   *cobra.Command
 	limit int
 	all   bool
-	page  int
+	page  string
 }
 
 type sentRecipient struct {
@@ -37,7 +38,7 @@ type sentMessage struct {
 	CC      []sentRecipient `json:"cc"`
 	BCC     []sentRecipient `json:"bcc"`
 	Summary string          `json:"summary,omitempty"`
-	SentAt  time.Time       `json:"sent_at"`
+	SentAt  *time.Time      `json:"sent_at"`
 	AppURL  string          `json:"app_url"`
 }
 
@@ -72,7 +73,7 @@ One page arrives by default. --limit reads pages until it has enough messages, a
 
 	sentCommand.cmd.Flags().IntVar(&sentCommand.limit, "limit", 0, "Maximum number of sent messages to show")
 	sentCommand.cmd.Flags().BoolVar(&sentCommand.all, "all", false, "Fetch up to 100 results pages (override --limit)")
-	sentCommand.cmd.Flags().IntVar(&sentCommand.page, "page", 1, "Results page")
+	sentCommand.cmd.Flags().StringVar(&sentCommand.page, "page", "", "Results page cursor")
 	return sentCommand
 }
 
@@ -80,18 +81,11 @@ func (c *sentCommand) run(cmd *cobra.Command, _ []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
-	if c.page < 1 {
-		return apierr.ErrUsage("--page must be at least 1")
-	}
 	if c.limit < 0 {
 		return apierr.ErrUsage("--limit must be at least 0")
 	}
 
-	startPage := ""
-	if c.page > 1 {
-		startPage = strconv.Itoa(c.page)
-	}
-	first, err := readSentPage(cmd.Context(), startPage)
+	first, err := readSentPage(cmd.Context(), c.page)
 	if err != nil {
 		return err
 	}
@@ -153,9 +147,10 @@ func makeSentMessages(topics []generated.Topic) []sentMessage {
 	messages := make([]sentMessage, 0, len(topics))
 	for _, topic := range topics {
 		entry := topic.LatestEntry
-		sentAt := entry.ActiveAt
-		if sentAt.IsZero() {
-			sentAt = entry.CreatedAt
+		var sentAt *time.Time
+		if !entry.ActiveAt.IsZero() {
+			activeAt := entry.ActiveAt
+			sentAt = &activeAt
 		}
 		messages = append(messages, sentMessage{
 			ID:      topic.Id,
@@ -193,7 +188,7 @@ func writeSentStyled(cmd *cobra.Command, messages []sentMessage, notice string) 
 			truncate(message.Subject, 42),
 			truncate(sentRecipientSummary(message), 32),
 			truncate(message.Summary, 52),
-			formatTimestamp(message.SentAt.Local()),
+			formatSentTimestamp(message.SentAt),
 		})
 	}
 	table.print()
@@ -211,7 +206,7 @@ func makeSentTableRows(messages []sentMessage) []sentTableRow {
 			Subject:    message.Subject,
 			Recipients: sentRecipientSummary(message),
 			Summary:    message.Summary,
-			Sent:       formatTimestamp(message.SentAt.Local()),
+			Sent:       formatSentTimestamp(message.SentAt),
 			AppURL:     message.AppURL,
 		}
 	}
@@ -237,10 +232,17 @@ func sentRecipientSummary(message sentMessage) string {
 	return fmt.Sprintf("Me → %s + %d", name, len(recipients)-1)
 }
 
+func formatSentTimestamp(sentAt *time.Time) string {
+	if sentAt == nil {
+		return "Unavailable"
+	}
+	return formatTimestamp(sentAt.Local())
+}
+
 func sentListingNotice(shown, pages int, nextPage string, truncated bool) string {
 	switch {
 	case truncated:
-		return fmt.Sprintf("Sent listing stopped after %d pages. Continue with --page %s.", pages, nextPage)
+		return fmt.Sprintf("Sent listing stopped after %d pages. Continue with --page %s.", pages, terminal.SanitizeLine(nextPage))
 	case nextPage != "":
 		return fmt.Sprintf("Showing %d %s. Use --all to see everything.", shown, sentMessageNoun(shown))
 	default:

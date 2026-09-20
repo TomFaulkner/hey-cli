@@ -43,7 +43,7 @@ type sentTestRow struct {
 	To      []sentTestRecipient `json:"to"`
 	CC      []sentTestRecipient `json:"cc"`
 	BCC     []sentTestRecipient `json:"bcc"`
-	SentAt  time.Time           `json:"sent_at"`
+	SentAt  *time.Time          `json:"sent_at"`
 	AppURL  string              `json:"app_url"`
 }
 
@@ -82,6 +82,9 @@ func TestSentCommandReturnsStableOutboundRows(t *testing.T) {
 	}
 	if len(row.BCC) != 1 || row.BCC[0].EmailAddress != "pat@example.com" {
 		t.Errorf("bcc = %#v", row.BCC)
+	}
+	if row.SentAt == nil {
+		t.Fatal("sent_at is nil")
 	}
 	if got := row.SentAt.Format(time.RFC3339); got != "2026-09-19T14:30:00Z" {
 		t.Errorf("sent_at = %q", got)
@@ -208,12 +211,48 @@ func TestSentCommandIDsAndCountUseThreadIDs(t *testing.T) {
 	}
 }
 
-func TestSentCommandRejectsInvalidPage(t *testing.T) {
-	_, err := runJSONCommand(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected request: %s", r.URL.String())
-	}), "sent", "--page", "0")
-	if err == nil || !strings.Contains(err.Error(), "--page must be at least 1") {
-		t.Fatalf("error = %v", err)
+func TestSentCommandPreservesOpaquePageCursor(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if page := r.URL.Query().Get("page"); page != "cursor-2" {
+			t.Errorf("page = %q, want cursor-2", page)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `</topics/sent.json?page=cursor-3>; rel="next"`)
+		_, _ = io.WriteString(w, sentTopicsJSON)
+	})
+
+	response, err := runJSONCommand(t, handler, "sent", "--page", "cursor-2")
+	if err != nil {
+		t.Fatalf("execute sent --page cursor-2: %v", err)
+	}
+	if got := response.Meta["page"]; got != "cursor-2" {
+		t.Errorf("page metadata = %#v", got)
+	}
+	if got := response.Meta["next_page"]; got != "cursor-3" {
+		t.Errorf("next_page metadata = %#v", got)
+	}
+}
+
+func TestSentCommandDoesNotUseCreationTimeAsDeliveryTime(t *testing.T) {
+	body := strings.Replace(sentTopicsJSON, `"active_at":"2026-09-19T14:30:00Z",`, "", 1)
+	response, err := runJSONCommand(t, sentTopicsHandler(t, body), "sent")
+	if err != nil {
+		t.Fatalf("execute sent: %v", err)
+	}
+
+	rows := decodeSentData[[]sentTestRow](t, response.Data)
+	if rows[0].SentAt != nil {
+		t.Errorf("sent_at = %v, want null", rows[0].SentAt)
+	}
+}
+
+func TestSentListingNoticeSanitizesCursor(t *testing.T) {
+	notice := sentListingNotice(100, 100, "cursor-\x1b[31mnext", true)
+	if strings.ContainsRune(notice, '\x1b') {
+		t.Errorf("notice contains escape byte: %q", notice)
+	}
+	if !strings.Contains(notice, "cursor-next") {
+		t.Errorf("notice = %q", notice)
 	}
 }
 
