@@ -124,6 +124,18 @@ func TestKeyringFailures(t *testing.T) {
 		}
 	})
 
+	t.Run("missing credential", func(t *testing.T) {
+		fake := newFakeKeyring()
+		store := keyringStore(t, fake)
+		if !store.UsingKeyring() {
+			t.Fatal("UsingKeyring = false")
+		}
+		_, err := store.Load("https://app.hey.com")
+		if !errors.Is(err, ErrCredentialsNotFound) {
+			t.Fatalf("error = %v, want ErrCredentialsNotFound", err)
+		}
+	})
+
 	t.Run("get error", func(t *testing.T) {
 		fake := newFakeKeyring()
 		store := keyringStore(t, fake)
@@ -132,8 +144,11 @@ func TestKeyringFailures(t *testing.T) {
 		}
 		fake.getErr = errors.New("locked")
 		_, err := store.Load("https://app.hey.com")
-		if err == nil || !strings.Contains(err.Error(), "credentials not found") {
+		if err == nil || !strings.Contains(err.Error(), "locked") {
 			t.Fatalf("error = %v", err)
+		}
+		if errors.Is(err, ErrCredentialsNotFound) {
+			t.Fatalf("error = %v, an unavailable keyring is not missing credentials", err)
 		}
 	})
 
@@ -240,8 +255,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestLoadNotFound(t *testing.T) {
 	s := testStore(t)
 	_, err := s.Load("https://app.hey.com")
-	if err == nil {
-		t.Fatal("expected error for missing credentials")
+	if !errors.Is(err, ErrCredentialsNotFound) {
+		t.Fatalf("error = %v, want ErrCredentialsNotFound", err)
 	}
 }
 
@@ -306,6 +321,56 @@ func TestConcurrentKeyringAvailabilityChecksAreReadOnly(t *testing.T) {
 	}
 	if setCalls != 0 || deleteCalls != 0 {
 		t.Errorf("availability checks mutated the keyring: Set = %d, Delete = %d", setCalls, deleteCalls)
+	}
+}
+
+func TestKeyringFailureOnFirstAccessPreservesKnownKeyringChoice(t *testing.T) {
+	t.Setenv("HEY_NO_KEYRING", "")
+	configDir := t.TempDir()
+
+	available := NewStore(configDir)
+	available.keyring = credentialKeyring{
+		get:    func(_, _ string) (string, error) { return "", keyringlib.ErrNotFound },
+		set:    func(_, _, _ string) error { return nil },
+		delete: func(_, _ string) error { return nil },
+	}
+	if !available.UsingKeyring() {
+		t.Fatal("available keyring was not selected")
+	}
+
+	locked := NewStore(configDir)
+	lockedErr := errors.New("keyring is locked")
+	locked.keyring = credentialKeyring{
+		get: func(_, user string) (string, error) {
+			if lockedErr != nil {
+				return "", lockedErr
+			}
+			if user == keyringAvailability {
+				return "", keyringlib.ErrNotFound
+			}
+			return `{"access_token":"recovered"}`, nil
+		},
+		set:    func(_, _, _ string) error { return nil },
+		delete: func(_, _ string) error { return nil },
+	}
+	_, err := locked.Load("https://app.hey.com")
+	if err == nil || !strings.Contains(err.Error(), "keyring is locked") {
+		t.Fatalf("Load error = %v, want the keyring failure", err)
+	}
+	if errors.Is(err, ErrCredentialsNotFound) {
+		t.Fatalf("Load error = %v, a known keyring becoming unavailable is not missing credentials", err)
+	}
+	if !locked.UsingKeyring() {
+		t.Error("known keyring choice was replaced with the fallback file")
+	}
+
+	lockedErr = nil
+	creds, err := locked.Load("https://app.hey.com")
+	if err != nil {
+		t.Fatalf("Load after unlock: %v", err)
+	}
+	if creds.AccessToken != "recovered" {
+		t.Errorf("access token = %q, want recovered", creds.AccessToken)
 	}
 }
 

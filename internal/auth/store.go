@@ -13,9 +13,15 @@ import (
 )
 
 const (
-	serviceName         = "hey"
-	keyringAvailability = "hey::availability"
+	serviceName               = "hey"
+	keyringAvailability       = "hey::availability"
+	storagePreferenceFilename = "credential-storage"
 )
+
+// ErrCredentialsNotFound means the store has no credential for an origin. It
+// does not cover a credential that could not be read from otherwise available
+// storage.
+var ErrCredentialsNotFound = errors.New("credentials not found")
 
 type credentialKeyring struct {
 	set    func(service, user, password string) error
@@ -65,11 +71,34 @@ func (s *Store) ensureInit() {
 		_, err := s.keyring.get(serviceName, keyringAvailability)
 		if err == nil || errors.Is(err, keyring.ErrNotFound) {
 			s.useKeyring = true
+			s.rememberKeyringChoice()
+			return
+		}
+		if s.keyringWasChosen() {
+			// Keep using the selected backend, but do not cache this probe failure:
+			// each real operation must be able to recover after the keyring unlocks.
+			s.useKeyring = true
 			return
 		}
 		fmt.Fprintf(os.Stderr, "warning: system keyring unavailable, credentials stored in plaintext at %s\n",
 			filepath.Join(s.fallbackDir, "credentials.json"))
 	})
+}
+
+func (s *Store) credentialStoragePath() string {
+	return filepath.Join(s.fallbackDir, storagePreferenceFilename)
+}
+
+func (s *Store) rememberKeyringChoice() {
+	if err := os.MkdirAll(s.fallbackDir, 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(s.credentialStoragePath(), []byte("keyring\n"), 0600)
+}
+
+func (s *Store) keyringWasChosen() bool {
+	choice, err := os.ReadFile(s.credentialStoragePath())
+	return err == nil && string(choice) == "keyring\n"
 }
 
 func key(origin string) string {
@@ -131,8 +160,11 @@ func (s *Store) delete(origin string) error {
 
 func (s *Store) loadFromKeyring(origin string) (*Credentials, error) {
 	data, err := s.keyring.get(serviceName, key(origin))
+	if errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("%w for %s", ErrCredentialsNotFound, origin)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("credentials not found: %w", err)
+		return nil, fmt.Errorf("read credentials from system keyring: %w", err)
 	}
 
 	var creds Credentials
@@ -221,7 +253,7 @@ func (s *Store) loadFromFile(origin string) (*Credentials, error) {
 
 	creds, ok := all[origin]
 	if !ok {
-		return nil, fmt.Errorf("credentials not found for %s", origin)
+		return nil, fmt.Errorf("%w for %s", ErrCredentialsNotFound, origin)
 	}
 	return creds, nil
 }

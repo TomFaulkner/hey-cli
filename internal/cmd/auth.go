@@ -184,7 +184,10 @@ func newAuthStatusCommand() *cobra.Command {
 
 			store := authMgr.GetStore()
 			creds, err := store.Load(authMgr.CredentialKey())
-			if err != nil || (creds.AccessToken == "" && creds.SessionCookie == "") {
+			if err != nil && !errors.Is(err, auth.ErrCredentialsNotFound) {
+				return fmt.Errorf("could not read authentication status: %w", err)
+			}
+			if errors.Is(err, auth.ErrCredentialsNotFound) || (creds.AccessToken == "" && creds.SessionCookie == "") {
 				if writer.IsStyled() {
 					w := cmd.OutOrStdout()
 					fmt.Fprintf(w, "Base URL:  %s\n", cfg.BaseURL)
@@ -326,12 +329,13 @@ Cookie header, so it is not a bearer token and this command refuses to print it.
 // authFailure reports a manager failure with the command's context in front of it.
 // The manager classifies its own refusals — a refused grant is auth, a throttled
 // token endpoint is rate_limit with how long to wait — and wrapping every one as
-// ErrAuth turned a 429 into exit 3 and "Run: hey auth login". A classified error
-// keeps its code, hint and status; only its message gains the context.
+// ErrAuth turned a 429 or a storage failure into exit 3 and "Run: hey auth login".
+// A classified error keeps its code, hint and status; an unclassified one keeps
+// its cause. Both gain only the command's context.
 func authFailure(context string, err error) error {
 	var classified *apierr.Error
 	if !errors.As(err, &classified) {
-		return apierr.ErrAuth(fmt.Sprintf("%s: %v", context, err))
+		return fmt.Errorf("%s: %w", context, err)
 	}
 	prefixed := *classified
 	prefixed.Message = fmt.Sprintf("%s: %s", context, classified.Message)
