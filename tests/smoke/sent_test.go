@@ -18,7 +18,7 @@ type smokeSentMessage struct {
 	To      []smokeSentRecipient `json:"to"`
 	CC      []smokeSentRecipient `json:"cc"`
 	BCC     []smokeSentRecipient `json:"bcc"`
-	SentAt  time.Time            `json:"sent_at"`
+	SentAt  *time.Time           `json:"sent_at"`
 	AppURL  string               `json:"app_url"`
 }
 
@@ -32,8 +32,8 @@ func TestSentListing(t *testing.T) {
 		if strings.TrimSpace(message.Subject) == "" {
 			t.Errorf("sent thread %d has no subject", message.ID)
 		}
-		if message.SentAt.IsZero() {
-			t.Errorf("sent thread %d has no sent_at", message.ID)
+		if message.SentAt != nil && message.SentAt.IsZero() {
+			t.Errorf("sent thread %d has an invalid sent_at", message.ID)
 		}
 		if strings.TrimSpace(message.AppURL) == "" {
 			t.Errorf("sent thread %d has no app_url", message.ID)

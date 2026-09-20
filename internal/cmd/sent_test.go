@@ -114,6 +114,41 @@ func TestSentCommandStyledMatchesHEYRecipientSummary(t *testing.T) {
 	}
 }
 
+func TestSentCommandMarkdownReportsRecipientsURLAndUnavailableDeliveryTime(t *testing.T) {
+	body := strings.Replace(sentTopicsJSON, `"active_at":"2026-09-19T14:30:00Z",`, "", 1)
+	markdown, err := runFormattedCommand(t, sentTopicsHandler(t, body), []string{"--markdown"}, "sent")
+	if err != nil {
+		t.Fatalf("execute sent --markdown: %v", err)
+	}
+	for _, want := range []string{
+		"Me → Sarah Chen + 2",
+		"https://app.hey.com/topics/42/entries/99",
+		"Unavailable",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("Markdown output missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+func TestSentCommandStyledShowsContinuationAfterAnEmptyPage(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `</topics/sent.json?page=cursor-2>; rel="next"`)
+		_, _ = io.WriteString(w, `{"title":"Sent Mail","topics":[]}`)
+	})
+
+	stdout, err := runStyledCommand(t, handler, "sent")
+	if err != nil {
+		t.Fatalf("execute sent --styled: %v", err)
+	}
+	for _, want := range []string{"No sent messages.", "Use --all to see everything."} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("styled output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestSentCommandAllFollowsNextPageLink(t *testing.T) {
 	var mu sync.Mutex
 	var pages []string

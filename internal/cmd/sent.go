@@ -177,6 +177,9 @@ func makeSentRecipients(contacts []generated.Contact) []sentRecipient {
 func writeSentStyled(cmd *cobra.Command, messages []sentMessage, notice string) error {
 	if len(messages) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No sent messages.")
+		if notice != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", notice)
+		}
 		return nil
 	}
 
