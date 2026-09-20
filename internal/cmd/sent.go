@@ -109,18 +109,17 @@ func (c *sentCommand) run(cmd *cobra.Command, _ []string) error {
 		notice = output.TruncationNotice(len(messages), len(collected.Items))
 	}
 
-	switch writer.EffectiveFormat() {
+	format := writer.EffectiveFormat()
+	if stderrNotice := paginationNoticeForStderr(format, notice); stderrNotice != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), stderrNotice)
+	}
+
+	switch format {
 	case output.FormatStyled:
 		return writeSentStyled(cmd, messages, notice)
 	case output.FormatMarkdown:
-		if stderrNotice := paginationNoticeForStderr(writer.EffectiveFormat(), notice); stderrNotice != "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), stderrNotice)
-		}
 		return writeOK(makeSentTableRows(messages))
 	default:
-		if stderrNotice := paginationNoticeForStderr(writer.EffectiveFormat(), notice); stderrNotice != "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), stderrNotice)
-		}
 		opts := []output.ResponseOption{
 			output.WithSummary(fmt.Sprintf("%d %s", len(messages), sentMessageNoun(len(messages)))),
 			output.WithNotice(notice),
