@@ -448,6 +448,77 @@ func TestMailViewKeepsAPartialThreadsNoticeAndLeavesItUnseen(t *testing.T) {
 	}
 }
 
+func TestLinkDestinationMustFitFooterBeforeOpening(t *testing.T) {
+	v := newMailView(testVC())
+	v.inThread = true
+	v.topicID = 100
+	v.selectedLink = 0
+	destination := "https://example.com/" + strings.Repeat("quarterly-report/", 3)
+	v.links = []mailLink{{destination: destination, key: "501\x000"}}
+	v.selectedLinkKey = v.links[0].key
+	v.vc.width = 120
+	v.contentHeight = 12
+	v.threadNotice = "Some messages were not read"
+
+	footer, visible := v.LinkFooter()
+	if !visible || !v.linkDestinationReviewable() {
+		t.Fatalf("link footer = %q visible=%v, want a reviewable footer", footer, visible)
+	}
+	if !strings.Contains(footer, destination) || !strings.Contains(footer, "press Enter to visit") || strings.Contains(footer, "...") {
+		t.Errorf("link footer = %q, want the complete destination and action", footer)
+	}
+	notices := v.threadNotices()
+	if len(notices) != 1 || notices[0] != v.threadNotice {
+		t.Errorf("selected link displaced permanent thread notice: %#v", notices)
+	}
+	for _, notice := range notices {
+		if strings.Contains(notice, destination) {
+			t.Errorf("thread notice still contains destination: %q", notice)
+		}
+	}
+	if hasHelpBinding(v.HelpBindings(), "enter") {
+		t.Error("footer action is duplicated in help")
+	}
+
+	var opened string
+	v.vc.openURL = func(destination string) error {
+		opened = destination
+		return nil
+	}
+	cmd, handled := v.handleLinkKey(keyPress("enter"))
+	if !handled || cmd == nil {
+		t.Fatal("a fully visible destination was not opened")
+	}
+	runCmd(cmd)
+	if opened != destination {
+		t.Errorf("opened %q, want %q", opened, destination)
+	}
+
+	v.vc.width = 24
+	footer, visible = v.LinkFooter()
+	if !visible || v.linkDestinationReviewable() || strings.Contains(footer, destination) {
+		t.Errorf("narrow link footer = %q visible=%v reviewable=%v", footer, visible, v.linkDestinationReviewable())
+	}
+	opened = ""
+	if cmd, handled := v.handleLinkKey(keyPress("enter")); !handled || cmd != nil || opened != "" {
+		t.Errorf("hidden destination opened: handled=%v command=%v destination=%q", handled, cmd != nil, opened)
+	}
+
+	v.vc.width = 3
+	if v.linkDestinationReviewable() {
+		t.Error("destination wider than a tiny terminal was marked reviewable")
+	}
+	if cmd, handled := v.handleLinkKey(keyPress("enter")); !handled || cmd != nil {
+		t.Errorf("tiny terminal opened destination: handled=%v command=%v", handled, cmd != nil)
+	}
+
+	v.selectedLink = -1
+	footer, visible = v.LinkFooter()
+	if !visible || footer != "" {
+		t.Errorf("unselected link footer = %q visible=%v, want one reserved blank row", footer, visible)
+	}
+}
+
 func TestMailViewLeavesBubbledUpThreadAloneWhenOpened(t *testing.T) {
 	v, recorded := mailWithTestServer(t, http.StatusNoContent)
 	v.postingList.postings[0].BubbledUp = true
