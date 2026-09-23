@@ -496,7 +496,7 @@ type postingsWatch struct {
 	boxes           map[int64]*watchedBox
 	labels          []watchEventLabel
 	seenPostings    map[int64]bool // posting IDs this watch has already classified
-	labeledPostings map[int64]bool // posting IDs already seen carrying a watched label
+	labeledPostings map[int64]bool // last known match of posting ID to a watched label
 	calendar        *calendarsWatch
 	cable           *actioncable.Client
 	changes         map[string]bool
@@ -791,7 +791,8 @@ func (w *postingsWatch) readBox(ctx context.Context, box *watchedBox) error {
 
 // classify decides whether a posting is new mail and records it, in that order.
 // With --label, a thread this watch already saw without the label that later
-// gains it counts as new, so --events new reports that filing.
+// gains it counts as new, so --events new reports that filing. Match state is
+// updated on every classification so a remove-then-re-add is another gain.
 func (w *postingsWatch) classify(box *watchedBox, posting generated.Posting) *bool {
 	isNew := w.newMail.isNew(box.id, posting)
 	if len(w.labels) > 0 {
@@ -802,9 +803,7 @@ func (w *postingsWatch) classify(box *watchedBox, posting generated.Posting) *bo
 			isNew = true
 		}
 		w.seenPostings[posting.Id] = true
-		if matched {
-			w.labeledPostings[posting.Id] = true
-		}
+		w.labeledPostings[posting.Id] = matched
 	}
 	w.newMail.record(posting)
 	return &isNew
